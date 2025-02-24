@@ -1,0 +1,22 @@
+@import url("https://fonts.googleapis.com/css2?family=Open+Sans:wght@300..800&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@theme {
+  --font-primary: "Open Sans", serif;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+.custom-text__input {
+  width: 30vw;
+}
+
+.custom-shadow {
+  box-shadow: 0px 0px 20px 12px rgba(0, 0, 0, 0.15);
+}

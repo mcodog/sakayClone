@@ -1,0 +1,41 @@
+.full-section {
+  height: 100vh;
+}
+
+.pseudo-phone {
+  position: relative;
+  box-shadow: 0px 0px 15px 5px rgba(0, 0, 0, 0.25);
+  border-radius: 3em;
+  width: 40%;
+  height: 80%;
+  padding: 0.475em;
+  padding-top: 1.275em;
+  padding-bottom: 0em;
+}
+
+.pseudo-phone img {
+  border-radius: 3em;
+}
+
+.pseudo-phone .pseudo-phone__top {
+  position: absolute;
+  top: 0.275em;
+  left: 18%;
+  background-color: white;
+  border-radius: 1em;
+  height: 5%;
+  width: 65%;
+  /* box-shadow: 0px 0px 8px 5px rgba(0, 0, 0, 0.05); */
+  /* border: 1px solid red; */
+}
+
+.how-to__card,
+.shadow-custom {
+  box-shadow: 0px 4px 7px 2px rgba(0, 0, 0, 0.2);
+}
+
+.login-card {
+  box-shadow: 0px 4px 7px 2px rgba(0, 0, 0, 0.2);
+  height: 35em;
+  width: 25em;
+}
