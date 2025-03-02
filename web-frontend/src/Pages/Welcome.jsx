@@ -5,7 +5,6 @@ import { useNavigate } from "react-router-dom";
 
 const GOOGLE_MAPS_API_KEY = "AIzaSyA95PKITYX6vnFS2d4gIS2J9caKnP0w-bA"; // Replace with your API key
 
-const containerStyle = { width: "100%", height: "400px" };
 const metroManilaBounds = {
   north: 15.0,
   south: 14.0,
@@ -21,7 +20,6 @@ const Welcome = () => {
   const autocompleteRef = useRef(null);
   const navigate = useNavigate();
 
-  // Get user's current location
   const getCurrentLocation = () => {
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
@@ -29,7 +27,6 @@ const Welcome = () => {
           const { latitude, longitude } = position.coords;
           setCurrentCoordinates({ lat: latitude, lng: longitude });
 
-          // Reverse geocode to get the address
           const geocoder = new window.google.maps.Geocoder();
           geocoder.geocode(
             { location: { lat: latitude, lng: longitude } },
@@ -49,7 +46,6 @@ const Welcome = () => {
     }
   };
 
-  // Handle place selection
   const handlePlaceSelect = () => {
     if (autocompleteRef.current) {
       const place = autocompleteRef.current.getPlace();
@@ -63,31 +59,19 @@ const Welcome = () => {
     }
   };
 
-  // useEffect(() => {
-  //   getCurrentLocation();
-  // }, []);
-
   const goToMap = () => {
     if (!currentCoordinates || !destinationCoordinates) {
       alert("Please select a starting and destination point.");
       return;
     }
 
-    // Construct URL with query parameters
-    const queryString = new URLSearchParams({
-      originLat: currentCoordinates.lat,
-      originLng: currentCoordinates.lng,
-      destinationLat: destinationCoordinates.lat,
-      destinationLng: destinationCoordinates.lng,
-    }).toString();
-
-    navigate(`/map?${queryString}`);
+    const queryString = `/map?srcLat=${currentCoordinates.lat}&srcLng=${currentCoordinates.lng}&destLat=${destinationCoordinates.lat}&destLng=${destinationCoordinates.lng}`;
+    navigate(queryString);
   };
 
   return (
     <LoadScript googleMapsApiKey={GOOGLE_MAPS_API_KEY} libraries={["places"]}>
       <div className="min-h-screen flex flex-col justify-center items-center bg-gray-100">
-        {/* Current Location */}
         <div className="flex flex-col gap-4 my-4 w-1/3">
           <div className="font-bold text-3xl text-center">Your location</div>
           <div className="border rounded-lg flex p-2 bg-white">
@@ -107,7 +91,6 @@ const Welcome = () => {
           </div>
         </div>
 
-        {/* Destination with Google Places Autocomplete */}
         <div className="flex flex-col gap-4 my-4 w-1/3">
           <div className="font-bold text-3xl text-center">
             Where would you like to go?
@@ -117,12 +100,12 @@ const Welcome = () => {
               className="flex w-full focus:outline-none focus:ring-0 p-2 pl-2"
               onLoad={(autocomplete) => {
                 autocompleteRef.current = autocomplete;
-                autocomplete.setBounds(metroManilaBounds); // Restrict search to Metro Manila
+                autocomplete.setBounds(metroManilaBounds);
               }}
               onPlaceChanged={handlePlaceSelect}
               options={{
                 componentRestrictions: { country: "PH" },
-                types: ["geocode"], // Prioritize addresses
+                types: ["geocode"],
               }}
             >
               <input
@@ -136,12 +119,6 @@ const Welcome = () => {
           </div>
         </div>
 
-        {/* Display Map */}
-        {/* <GoogleMap
-          mapContainerStyle={containerStyle}
-          center={currentCoordinates || { lat: 14.5995, lng: 120.9842 }}
-          zoom={currentCoordinates ? 14 : 12}
-        /> */}
         <button
           onClick={goToMap}
           className="bg-green-600 text-white p-4 rounded-lg mt-4"

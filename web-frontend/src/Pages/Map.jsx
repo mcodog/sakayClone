@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import {
   MapContainer,
   TileLayer,
@@ -6,11 +5,15 @@ import {
   Marker,
   Popup,
   Polyline,
+  useMap,
 } from "react-leaflet";
+import { useEffect, useState, useRef } from "react";
 import "leaflet/dist/leaflet.css";
+import { Icon } from "leaflet";
 import L from "leaflet";
+import "leaflet-routing-machine";
+import { useSearchParams } from "react-router-dom";
 
-// Fix for default marker icon issue
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl:
@@ -21,767 +24,1052 @@ L.Icon.Default.mergeOptions({
     "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png",
 });
 
-// Colors for different transportation modes
-const TRANSPORT_COLORS = {
-  jeepney: "#FF4500", // OrangeRed
-  bus: "#1E90FF", // DodgerBlue
-  tricycle: "#32CD32", // LimeGreen
-  walk: "#9932CC", // DarkOrchid
+const createCustomIcon = (color) => {
+  return new L.Icon({
+    iconUrl: `https://cdn.rawgit.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-${color}.png`,
+    shadowUrl:
+      "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png",
+    iconSize: [25, 41],
+    iconAnchor: [12, 41],
+    popupAnchor: [1, -34],
+    shadowSize: [41, 41],
+  });
 };
 
-const CommuteGuide = () => {
-  const [geojsonData, setGeojsonData] = useState([]);
-  const [selectedRoute, setSelectedRoute] = useState(null);
-  const [mapKey, setMapKey] = useState(0);
-  const [origin, setOrigin] = useState(null);
-  const [destination, setDestination] = useState(null);
-  const [suggestedRoutes, setSuggestedRoutes] = useState([]);
-  const [transportModes, setTransportModes] = useState({});
-  const [loading, setLoading] = useState(true);
+const sourceIcon = createCustomIcon("green");
+const destinationIcon = createCustomIcon("red");
+const transferIcon = createCustomIcon("orange");
 
-  // Parse URL parameters
+const modeColors = {
+  bus: "#1a73e8",
+  jeep: "#0d8f33",
+  train: "#e53935",
+  ferry: "#8e24aa",
+  tricycle: "#f57c00",
+  walk: "#000000",
+  other: "#607d8b",
+};
+
+const MapViewSetter = ({ bounds }) => {
+  const map = useMap();
+
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const originLat = parseFloat(params.get("originLat"));
-    const originLng = parseFloat(params.get("originLng"));
-    const destLat = parseFloat(params.get("destinationLat"));
-    const destLng = parseFloat(params.get("destinationLng"));
-
-    if (!isNaN(originLat) && !isNaN(originLng)) {
-      setOrigin({ lat: originLat, lng: originLng });
+    if (bounds && bounds.length > 0) {
+      const leafletBounds = L.latLngBounds(bounds);
+      map.fitBounds(leafletBounds, { padding: [50, 50] });
     }
+  }, [bounds, map]);
 
-    if (!isNaN(destLat) && !isNaN(destLng)) {
-      setDestination({ lat: destLat, lng: destLng });
-    }
-  }, []);
+  return null;
+};
 
-  // Load GeoJSON data
+const WalkingRoute = ({ from, to, color, onRouteGenerated }) => {
+  const map = useMap();
+  const routingControlRef = useRef(null);
+
   useEffect(() => {
-    const loadGeoJSON = async () => {
-      setLoading(true);
-      try {
-        const response = await fetch("../data/export.geojson");
-        const data = await response.json();
-
-        // Add transport mode to each route if not already present
-        const processedData = data.features.map((feature) => {
-          if (!feature.properties.transportMode) {
-            // Randomly assign a transport mode based on route characteristics
-            // This is a simplified approach - in real application, you'd use actual data
-            const routeName = feature.properties.name?.toLowerCase() || "";
-            let mode = "jeepney"; // Default
-
-            if (routeName.includes("bus")) {
-              mode = "bus";
-            } else if (routeName.includes("tricycle")) {
-              mode = "tricycle";
-            } else if (feature.properties.length < 0.5) {
-              // Short routes might be tricycle routes
-              mode = "tricycle";
-            } else if (feature.properties.length > 5) {
-              // Longer routes might be bus routes
-              mode = "bus";
-            }
-
-            return {
-              ...feature,
-              properties: {
-                ...feature.properties,
-                transportMode: mode,
-              },
-            };
-          }
-          return feature;
-        });
-
-        setGeojsonData(processedData || []);
-      } catch (error) {
-        console.error("Error loading GeoJSON:", error);
-        setGeojsonData([]);
-      } finally {
-        setLoading(false);
+    if (from && to) {
+      if (routingControlRef.current) {
+        map.removeControl(routingControlRef.current);
       }
-    };
 
-    loadGeoJSON();
-  }, []);
-
-  // Build commute routes when origin, destination, and geojsonData are all available
-  useEffect(() => {
-    if (origin && destination && geojsonData.length > 0) {
-      buildCommuteRoutes();
-    }
-  }, [origin, destination, geojsonData]);
-
-  // Function to calculate distance between two points
-  const calculateDistance = (lat1, lon1, lat2, lon2) => {
-    const R = 6371; // Radius of the earth in km
-    const dLat = ((lat2 - lat1) * Math.PI) / 180;
-    const dLon = ((lon2 - lon1) * Math.PI) / 180;
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos((lat1 * Math.PI) / 180) *
-        Math.cos((lat2 * Math.PI) / 180) *
-        Math.sin(dLon / 2) *
-        Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c; // Distance in km
-  };
-
-  // Calculate nearest point on a line to a given point
-  const nearestPointOnLine = (point, lineStart, lineEnd) => {
-    const x1 = lineStart[0];
-    const y1 = lineStart[1];
-    const x2 = lineEnd[0];
-    const y2 = lineEnd[1];
-    const px = point[0];
-    const py = point[1];
-
-    // Line segment length squared
-    const segmentLengthSq = Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2);
-
-    // If zero length line, return start point
-    if (segmentLengthSq === 0) return [x1, y1];
-
-    // Calculate projection parameter
-    const t = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / segmentLengthSq;
-
-    if (t < 0) return [x1, y1]; // Beyond start point
-    if (t > 1) return [x2, y2]; // Beyond end point
-
-    // Projection on line
-    return [x1 + t * (x2 - x1), y1 + t * (y2 - y1)];
-  };
-
-  // Find minimum distance from a point to a route and return the nearest point
-  const minDistanceAndPointToRoute = (point, route) => {
-    let minDist = Infinity;
-    let nearestCoord = null;
-
-    // For each route, check all line segments
-    if (route.geometry && route.geometry.coordinates) {
-      const coords = route.geometry.coordinates;
-
-      // For LineString
-      if (route.geometry.type === "LineString") {
-        for (let i = 0; i < coords.length - 1; i++) {
-          const start = coords[i];
-          const end = coords[i + 1];
-          const nearest = nearestPointOnLine(
-            [point.lng, point.lat],
-            start,
-            end
-          );
-          const dist = calculateDistance(
-            point.lat,
-            point.lng,
-            nearest[1],
-            nearest[0]
-          );
-          if (dist < minDist) {
-            minDist = dist;
-            nearestCoord = nearest;
-          }
-        }
-      }
-      // For MultiLineString
-      else if (route.geometry.type === "MultiLineString") {
-        for (const line of coords) {
-          for (let i = 0; i < line.length - 1; i++) {
-            const start = line[i];
-            const end = line[i + 1];
-            const nearest = nearestPointOnLine(
-              [point.lng, point.lat],
-              start,
-              end
-            );
-            const dist = calculateDistance(
-              point.lat,
-              point.lng,
-              nearest[1],
-              nearest[0]
-            );
-            if (dist < minDist) {
-              minDist = dist;
-              nearestCoord = nearest;
-            }
-          }
-        }
-      }
-    }
-
-    return {
-      distance: minDist,
-      point: nearestCoord ? [nearestCoord[1], nearestCoord[0]] : null,
-    };
-  };
-
-  // Extract coordinates from a GeoJSON feature
-  const extractCoordinates = (feature) => {
-    if (!feature.geometry) return [];
-
-    const coords = [];
-    if (feature.geometry.type === "LineString") {
-      return feature.geometry.coordinates.map((coord) => [coord[1], coord[0]]);
-    } else if (feature.geometry.type === "MultiLineString") {
-      feature.geometry.coordinates.forEach((line) => {
-        line.forEach((coord) => {
-          coords.push([coord[1], coord[0]]);
-        });
+      const routingControl = L.Routing.control({
+        waypoints: [L.latLng(from[0], from[1]), L.latLng(to[0], to[1])],
+        lineOptions: {
+          styles: [{ color, weight: 4, opacity: 0.7 }],
+          extendToWaypoints: true,
+          missingRouteTolerance: 0,
+        },
+        show: false,
+        addWaypoints: false,
+        routeWhileDragging: false,
+        fitSelectedRoutes: false,
+        showAlternatives: false,
       });
+
+      routingControl.on("routesfound", function (e) {
+        const routes = e.routes;
+        const route = routes[0];
+
+        if (onRouteGenerated) {
+          onRouteGenerated({
+            coordinates: route.coordinates.map((c) => [c.lat, c.lng]),
+            distance: route.summary.totalDistance,
+            time: route.summary.totalTime,
+            instructions: route.instructions,
+          });
+        }
+      });
+
+      routingControl.addTo(map);
+      routingControlRef.current = routingControl;
+
+      return () => {
+        if (routingControlRef.current) {
+          map.removeControl(routingControlRef.current);
+        }
+      };
     }
-    return coords;
+  }, [from, to, color, map, onRouteGenerated]);
+
+  return null;
+};
+
+const TransportRoutesMap = () => {
+  const [searchParams] = useSearchParams();
+  const [geojsonData, setGeojsonData] = useState(null);
+  const [routeData, setRouteData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [source, setSource] = useState(null);
+  const [destination, setDestination] = useState(null);
+  const [routeFound, setRouteFound] = useState(false);
+  const [currentRoute, setCurrentRoute] = useState(null);
+  const [mapBounds, setMapBounds] = useState([]);
+  const [walkingRoutes, setWalkingRoutes] = useState([]);
+  const [transferPoints, setTransferPoints] = useState([]);
+
+  const defaultCenter = [14.5995, 120.9842];
+
+  const calculateFare = (mode, distanceInMeters) => {
+    const distanceInKm = distanceInMeters / 1000;
+
+    switch (mode) {
+      case "jeep":
+        return distanceInKm <= 4
+          ? 13
+          : 13 + Math.ceil((distanceInKm - 4) * 1.8);
+
+      case "bus":
+        return distanceInKm <= 5
+          ? 13
+          : 13 + Math.ceil((distanceInKm - 5) * 2.2);
+
+      case "train":
+        const trainFare =
+          distanceInKm <= 5 ? 15 : 15 + Math.ceil((distanceInKm - 5) * 1.5);
+        return Math.min(trainFare, 35);
+
+      case "tricycle":
+        return distanceInKm <= 2 ? 25 : 25 + Math.ceil((distanceInKm - 2) * 8);
+
+      case "ferry":
+        if (distanceInKm <= 5) return 50;
+        if (distanceInKm <= 10) return 80;
+        return 100;
+
+      case "walk":
+        return 0;
+
+      default:
+        return distanceInKm <= 5
+          ? 13
+          : 13 + Math.ceil((distanceInKm - 5) * 2.2);
+    }
   };
 
-  // Create a walking path between points
-  const createWalkingPath = (from, to) => {
-    // For simplicity, create a direct line
-    return {
-      type: "Feature",
-      properties: {
-        name: "Walking Path",
-        transportMode: "walk",
-        distance: calculateDistance(from[0], from[1], to[0], to[1]),
-        duration: calculateDistance(from[0], from[1], to[0], to[1]) * 12, // Assuming 5km/h walking speed (12 min per km)
-      },
-      geometry: {
-        type: "LineString",
-        coordinates: [
-          [from[1], from[0]],
-          [to[1], to[0]],
-        ],
-      },
-    };
+  const formatFare = (fare) => {
+    return `₱${fare.toFixed(2)}`;
   };
 
-  // Build multimodal commute routes
-  const buildCommuteRoutes = () => {
-    if (!origin || !destination || loading) return;
+  useEffect(() => {
+    const srcLat = searchParams.get("srcLat");
+    const srcLng = searchParams.get("srcLng");
+    const destLat = searchParams.get("destLat");
+    const destLng = searchParams.get("destLng");
 
-    // First, find nearest points on available routes for origin and destination
-    const routeAccessPoints = geojsonData.map((route) => {
-      const originAccess = minDistanceAndPointToRoute(origin, route);
-      const destAccess = minDistanceAndPointToRoute(destination, route);
+    if (srcLat && srcLng) {
+      setSource([parseFloat(srcLat), parseFloat(srcLng)]);
+    }
+
+    if (destLat && destLng) {
+      setDestination([parseFloat(destLat), parseFloat(destLng)]);
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    setLoading(true);
+    fetch("/data/export.geojson")
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Network response was not ok: ${response.status}`);
+        }
+        return response.json();
+      })
+      .then((data) => {
+        setGeojsonData(data);
+        processRouteData(data);
+        setLoading(false);
+      })
+      .catch((error) => {
+        console.error("Error loading GeoJSON:", error);
+        setError(error.message);
+        setLoading(false);
+      });
+  }, []);
+
+  const processRouteData = (data) => {
+    if (!data || !data.features) return;
+
+    const routes = data.features.map((feature) => {
+      const { geometry, properties } = feature;
+      const mode = extractModeFromName(properties?.name || "");
+
+      let coordinates = [];
+      if (geometry.type === "LineString") {
+        coordinates = geometry.coordinates.map((coord) => [coord[1], coord[0]]);
+      } else if (geometry.type === "MultiLineString") {
+        geometry.coordinates.forEach((line) => {
+          coordinates = coordinates.concat(
+            line.map((coord) => [coord[1], coord[0]])
+          );
+        });
+      }
 
       return {
-        route,
-        originAccess,
-        destAccess,
-        score:
-          originAccess.distance +
-          destAccess.distance +
-          extractCoordinates(route).length / 100, // Consider route complexity
+        id: properties.id || `route-${Math.random().toString(36).substr(2, 9)}`,
+        name: properties.name || "Unnamed Route",
+        mode,
+        color: modeColors[mode] || modeColors.other,
+        coordinates,
+        properties,
       };
     });
 
-    // Sort by accessibility score
-    const sortedRoutes = routeAccessPoints.sort((a, b) => a.score - b.score);
-
-    // Get top routes for building our suggestions
-    const topRoutes = sortedRoutes.slice(0, Math.min(5, sortedRoutes.length));
-
-    // Build first suggestion - direct route with fewest transfers
-    const directRoute = buildDirectRoute(topRoutes[0]);
-
-    // Build second suggestion - potentially faster but more transfers
-    const alternativeRoute = buildAlternativeRoute(topRoutes);
-
-    setSuggestedRoutes([directRoute, alternativeRoute]);
-    setSelectedRoute(directRoute);
-    setMapKey((prevKey) => prevKey + 1);
+    setRouteData(routes);
   };
 
-  // Build a direct route option
-  const buildDirectRoute = (routeData) => {
-    if (!routeData) return null;
+  const extractModeFromName = (name) => {
+    if (!name) return "other";
 
-    const route = routeData.route;
-    const walkToRoute = createWalkingPath(
-      [origin.lat, origin.lng],
-      routeData.originAccess.point
-    );
+    name = name.toLowerCase();
 
-    const walkFromRoute = createWalkingPath(routeData.destAccess.point, [
-      destination.lat,
-      destination.lng,
-    ]);
+    if (name.includes("bus route") || name.includes("city bus")) return "bus";
+    if (name.includes("jeep") || name.includes("jeepney")) return "jeep";
+    if (
+      name.includes("train") ||
+      name.includes("railway") ||
+      name.includes("lrt") ||
+      name.includes("mrt")
+    )
+      return "train";
+    if (
+      name.includes("ferry") ||
+      name.includes("boat") ||
+      name.includes("water")
+    )
+      return "ferry";
+    if (name.includes("tricycle") || name.includes("trike")) return "tricycle";
 
-    // Calculate total journey details
-    const totalDistance =
-      walkToRoute.properties.distance +
-      (route.properties.length || 0) +
-      walkFromRoute.properties.distance;
-
-    // Estimate times based on mode of transport
-    let mainRouteDuration = 0;
-    if (route.properties.transportMode === "bus") {
-      mainRouteDuration = (route.properties.length || 0) * 3; // 20km/h
-    } else if (route.properties.transportMode === "jeepney") {
-      mainRouteDuration = (route.properties.length || 0) * 4; // 15km/h
-    } else if (route.properties.transportMode === "tricycle") {
-      mainRouteDuration = (route.properties.length || 0) * 5; // 12km/h
-    }
-
-    const totalDuration =
-      walkToRoute.properties.duration +
-      mainRouteDuration +
-      walkFromRoute.properties.duration;
-
-    return {
-      name: `${route.properties.transportMode.toUpperCase()}: ${
-        route.properties.name
-      }`,
-      segments: [
-        { ...walkToRoute, position: 0 },
-        { ...route, position: 1 },
-        { ...walkFromRoute, position: 2 },
-      ],
-      totalDistance,
-      totalDuration,
-      transfers: 2, // Number of transfers (walk->transport->walk)
-      description: `Walk to ${route.properties.transportMode} → ${route.properties.name} → Walk to destination`,
-    };
+    return "other";
   };
 
-  // Build a potentially more complex but efficient route
-  const buildAlternativeRoute = (routesData) => {
-    if (routesData.length < 2) {
-      // If we don't have enough routes, just return something similar to direct route
-      return buildDirectRoute(routesData[0]);
-    }
-
-    // Try to find a combination of routes
-    // For simplicity, let's use the first and second best route
-    const firstRoute = routesData[0].route;
-    const secondRoute = routesData[1].route;
-
-    // Find an intersection point (this is simplified - real implementation would be more complex)
-    // Here we're just using the nearest points between routes
-    const intersectionPoint = findNearestPointsBetweenRoutes(
-      firstRoute,
-      secondRoute
-    );
-
-    // Create the segments
-    const walkToFirstRoute = createWalkingPath(
-      [origin.lat, origin.lng],
-      routesData[0].originAccess.point
-    );
-
-    // Create a transfer segment
-    const transferSegment = createWalkingPath(
-      intersectionPoint.firstRoutePoint,
-      intersectionPoint.secondRoutePoint
-    );
-
-    const walkToDestination = createWalkingPath(
-      routesData[1].destAccess.point,
-      [destination.lat, destination.lng]
-    );
-
-    // Calculate total journey details
-    const totalDistance =
-      walkToFirstRoute.properties.distance +
-      (intersectionPoint.firstRouteDistance || 0) +
-      transferSegment.properties.distance +
-      (intersectionPoint.secondRouteDistance || 0) +
-      walkToDestination.properties.distance;
-
-    // Estimate times
-    let firstRouteDuration = getDurationForMode(
-      firstRoute.properties.transportMode,
-      intersectionPoint.firstRouteDistance
-    );
-
-    let secondRouteDuration = getDurationForMode(
-      secondRoute.properties.transportMode,
-      intersectionPoint.secondRouteDistance
-    );
-
-    const totalDuration =
-      walkToFirstRoute.properties.duration +
-      firstRouteDuration +
-      transferSegment.properties.duration +
-      secondRouteDuration +
-      walkToDestination.properties.duration;
-
-    // Create partial route segments
-    const firstPartialRoute = createPartialRoute(
-      firstRoute,
-      routesData[0].originAccess.point,
-      intersectionPoint.firstRoutePoint,
-      intersectionPoint.firstRouteDistance
-    );
-
-    const secondPartialRoute = createPartialRoute(
-      secondRoute,
-      intersectionPoint.secondRoutePoint,
-      routesData[1].destAccess.point,
-      intersectionPoint.secondRouteDistance
-    );
-
-    return {
-      name: `${firstRoute.properties.transportMode.toUpperCase()} → ${secondRoute.properties.transportMode.toUpperCase()}`,
-      segments: [
-        { ...walkToFirstRoute, position: 0 },
-        { ...firstPartialRoute, position: 1 },
-        { ...transferSegment, position: 2 },
-        { ...secondPartialRoute, position: 3 },
-        { ...walkToDestination, position: 4 },
-      ],
-      totalDistance,
-      totalDuration,
-      transfers: 4, // Number of transfers
-      description: `Walk to ${firstRoute.properties.transportMode} → ${firstRoute.properties.name} → Transfer to ${secondRoute.properties.transportMode} → ${secondRoute.properties.name} → Walk to destination`,
-    };
+  const getColor = (feature) => {
+    const name = feature.properties?.name || "";
+    const mode = extractModeFromName(name);
+    return modeColors[mode] || modeColors.other;
   };
 
-  // Get duration based on transport mode
-  const getDurationForMode = (mode, distance) => {
-    if (mode === "bus") {
-      return distance * 3; // 20km/h
-    } else if (mode === "jeepney") {
-      return distance * 4; // 15km/h
-    } else if (mode === "tricycle") {
-      return distance * 5; // 12km/h
-    } else {
-      return distance * 12; // 5km/h for walking
-    }
-  };
+  const calculateDistance = (coord1, coord2) => {
+    if (!coord1 || !coord2) return Infinity;
 
-  // Create a partial route segment
-  const createPartialRoute = (route, startPoint, endPoint, distance) => {
-    // This is a simplified version - in reality you'd need to truncate the actual route geometry
-    return {
-      ...route,
-      properties: {
-        ...route.properties,
-        length: distance,
-        duration: getDurationForMode(route.properties.transportMode, distance),
-      },
-    };
-  };
+    const lat1 = coord1[0];
+    const lon1 = coord1[1];
+    const lat2 = coord2[0];
+    const lon2 = coord2[1];
 
-  // Find potential transfer points between routes
-  const findNearestPointsBetweenRoutes = (route1, route2) => {
-    const coords1 = extractCoordinates(route1);
-    const coords2 = extractCoordinates(route2);
+    const R = 6371e3;
+    const φ1 = (lat1 * Math.PI) / 180;
+    const φ2 = (lat2 * Math.PI) / 180;
+    const Δφ = ((lat2 - lat1) * Math.PI) / 180;
+    const Δλ = ((lon2 - lon1) * Math.PI) / 180;
 
-    let minDist = Infinity;
-    let bestPoint1 = null;
-    let bestPoint2 = null;
-    let distanceFromStart1 = 0;
-    let distanceFromStart2 = 0;
+    const a =
+      Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+      Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    const distance = R * c;
 
-    // For simplicity, we're doing a brute force search of all points
-    // In a real app, you'd use spatial indexing for efficiency
-    for (let i = 0; i < coords1.length; i++) {
-      for (let j = 0; j < coords2.length; j++) {
-        const dist = calculateDistance(
-          coords1[i][0],
-          coords1[i][1],
-          coords2[j][0],
-          coords2[j][1]
-        );
-
-        if (dist < minDist) {
-          minDist = dist;
-          bestPoint1 = coords1[i];
-          bestPoint2 = coords2[j];
-
-          // Calculate approximate distances along routes
-          distanceFromStart1 =
-            i > 0 ? calculateRouteDistance(coords1.slice(0, i + 1)) : 0;
-          distanceFromStart2 =
-            j > 0 ? calculateRouteDistance(coords2.slice(j)) : 0;
-        }
-      }
-    }
-
-    return {
-      distance: minDist,
-      firstRoutePoint: bestPoint1,
-      secondRoutePoint: bestPoint2,
-      firstRouteDistance: distanceFromStart1,
-      secondRouteDistance: distanceFromStart2,
-    };
-  };
-
-  // Calculate distance along a route
-  const calculateRouteDistance = (coordinates) => {
-    let distance = 0;
-    for (let i = 0; i < coordinates.length - 1; i++) {
-      distance += calculateDistance(
-        coordinates[i][0],
-        coordinates[i][1],
-        coordinates[i + 1][0],
-        coordinates[i + 1][1]
-      );
-    }
     return distance;
   };
 
-  const handleRouteSelect = (route) => {
-    setSelectedRoute(route);
-    setMapKey((prevKey) => prevKey + 1);
-  };
-
-  const formatDuration = (minutes) => {
-    const hrs = Math.floor(minutes / 60);
-    const mins = Math.round(minutes % 60);
-    if (hrs > 0) {
-      return `${hrs}h ${mins}m`;
+  const findNearestPointOnRoute = (coordinate, route) => {
+    if (!route || !route.coordinates || route.coordinates.length === 0) {
+      return null;
     }
-    return `${mins} min`;
+
+    let minDistance = Infinity;
+    let nearestPoint = null;
+    let pointIndex = -1;
+
+    route.coordinates.forEach((coord, index) => {
+      const distance = calculateDistance(coordinate, coord);
+      if (distance < minDistance) {
+        minDistance = distance;
+        nearestPoint = coord;
+        pointIndex = index;
+      }
+    });
+
+    return { point: nearestPoint, distance: minDistance, index: pointIndex };
   };
 
-  // Calculate map center and zoom based on origin and destination
-  const getMapView = () => {
-    if (origin && destination) {
-      const center = {
-        lat: (origin.lat + destination.lat) / 2,
-        lng: (origin.lng + destination.lng) / 2,
+  const findNearestRoute = (coordinate, routes) => {
+    if (!routes || routes.length === 0) {
+      return null;
+    }
+
+    let minDistance = Infinity;
+    let nearestRoute = null;
+    let nearestPoint = null;
+    let pointIndex = -1;
+
+    routes.forEach((route) => {
+      const result = findNearestPointOnRoute(coordinate, route);
+      if (result && result.distance < minDistance) {
+        minDistance = result.distance;
+        nearestRoute = route;
+        nearestPoint = result.point;
+        pointIndex = result.index;
+      }
+    });
+
+    return {
+      route: nearestRoute,
+      point: nearestPoint,
+      distance: minDistance,
+      index: pointIndex,
+    };
+  };
+
+  const findRoute = () => {
+    if (!source || !destination || !routeData || routeData.length === 0) {
+      return;
+    }
+
+    setLoading(true);
+
+    const directDistance = calculateDistance(source, destination);
+
+    if (directDistance <= 500) {
+      const walkingFare = calculateFare("walk", directDistance);
+
+      setCurrentRoute({
+        segments: [
+          {
+            type: "walk",
+            from: source,
+            to: destination,
+            color: modeColors.walk,
+            distance: directDistance,
+            fare: walkingFare,
+          },
+        ],
+        totalDistance: directDistance,
+        totalTime: directDistance / 1.4,
+        totalFare: walkingFare,
+      });
+
+      setMapBounds([source, destination]);
+      setRouteFound(true);
+      setLoading(false);
+      return;
+    }
+
+    const sourceResult = findNearestRoute(source, routeData);
+    const destResult = findNearestRoute(destination, routeData);
+
+    if (!sourceResult || !destResult) {
+      setError("Could not find suitable routes near your locations.");
+      setRouteFound(false);
+      setLoading(false);
+      return;
+    }
+
+    if (sourceResult.route.id === destResult.route.id) {
+      const sourceIndex = sourceResult.index;
+      const destIndex = destResult.index;
+      const routeCoords = sourceResult.route.coordinates;
+
+      let routeSegment;
+      let routeSegmentDistance = 0;
+
+      if (sourceIndex <= destIndex) {
+        routeSegment = routeCoords.slice(sourceIndex, destIndex + 1);
+      } else {
+        routeSegment = routeCoords.slice(destIndex, sourceIndex + 1).reverse();
+      }
+
+      for (let i = 0; i < routeSegment.length - 1; i++) {
+        routeSegmentDistance += calculateDistance(
+          routeSegment[i],
+          routeSegment[i + 1]
+        );
+      }
+
+      const initialWalkFare = calculateFare("walk", sourceResult.distance);
+      const transportFare = calculateFare(
+        sourceResult.route.mode,
+        routeSegmentDistance
+      );
+      const finalWalkFare = calculateFare("walk", destResult.distance);
+
+      const initialWalk = {
+        type: "walk",
+        from: source,
+        to: sourceResult.point,
+        color: modeColors.walk,
+        distance: sourceResult.distance,
+        fare: initialWalkFare,
       };
-      return { center, zoom: 13 };
+
+      const finalWalk = {
+        type: "walk",
+        from: destResult.point,
+        to: destination,
+        color: modeColors.walk,
+        distance: destResult.distance,
+        fare: finalWalkFare,
+      };
+
+      const transportSegment = {
+        type: sourceResult.route.mode,
+        from: sourceResult.point,
+        to: destResult.point,
+        route: sourceResult.route,
+        color: sourceResult.route.color,
+        coordinates: routeSegment,
+        distance: routeSegmentDistance,
+        fare: transportFare,
+      };
+
+      const totalFare = initialWalkFare + transportFare + finalWalkFare;
+
+      setCurrentRoute({
+        segments: [initialWalk, transportSegment, finalWalk],
+        totalDistance:
+          sourceResult.distance + routeSegmentDistance + destResult.distance,
+        totalTime:
+          (sourceResult.distance + destResult.distance) / 1.4 +
+          routeSegmentDistance / getSpeed(sourceResult.route.mode),
+        totalFare: totalFare,
+      });
+
+      setTransferPoints([
+        {
+          position: sourceResult.point,
+          type: "boarding",
+          route: sourceResult.route.name,
+        },
+        {
+          position: destResult.point,
+          type: "alighting",
+          route: sourceResult.route.name,
+        },
+      ]);
+
+      setMapBounds([source, ...routeSegment, destination]);
+      setRouteFound(true);
+      setLoading(false);
+      return;
     }
-    return { center: [14.5995, 120.9842], zoom: 12 };
+
+    let minTotalDistance = Infinity;
+    let bestSourceRoute = null;
+    let bestDestRoute = null;
+    let bestTransferPoint = null;
+    let bestSourceNearestPoint = null;
+    let bestDestNearestPoint = null;
+
+    routeData.forEach((route) => {
+      if (route.coordinates.length < 2) return;
+
+      if (
+        route.id === sourceResult.route.id ||
+        route.id === destResult.route.id
+      )
+        return;
+
+      const sourceRouteResult = findNearestRoute(sourceResult.point, [route]);
+      const destRouteResult = findNearestRoute(destResult.point, [route]);
+
+      if (!sourceRouteResult || !destRouteResult) return;
+
+      const totalDistance =
+        sourceResult.distance +
+        calculateDistance(sourceResult.point, sourceRouteResult.point) +
+        calculateDistance(sourceRouteResult.point, destRouteResult.point) +
+        destResult.distance;
+
+      if (totalDistance < minTotalDistance) {
+        minTotalDistance = totalDistance;
+        bestSourceRoute = sourceResult.route;
+        bestDestRoute = destResult.route;
+        bestTransferPoint = sourceRouteResult.point;
+        bestSourceNearestPoint = sourceResult.point;
+        bestDestNearestPoint = destResult.point;
+      }
+    });
+
+    if (bestTransferPoint) {
+      const initialWalkDistance = sourceResult.distance;
+      const finalWalkDistance = destResult.distance;
+      const firstTransportDistance = calculateDistance(
+        bestSourceNearestPoint,
+        bestTransferPoint
+      );
+      const secondTransportDistance = calculateDistance(
+        bestTransferPoint,
+        bestDestNearestPoint
+      );
+
+      const initialWalkFare = calculateFare("walk", initialWalkDistance);
+      const finalWalkFare = calculateFare("walk", finalWalkDistance);
+      const firstTransportFare = calculateFare(
+        bestSourceRoute.mode,
+        firstTransportDistance
+      );
+      const secondTransportFare = calculateFare(
+        bestDestRoute.mode,
+        secondTransportDistance
+      );
+
+      const initialWalk = {
+        type: "walk",
+        from: source,
+        to: bestSourceNearestPoint,
+        color: modeColors.walk,
+        distance: initialWalkDistance,
+        fare: initialWalkFare,
+      };
+
+      const finalWalk = {
+        type: "walk",
+        from: bestDestNearestPoint,
+        to: destination,
+        color: modeColors.walk,
+        distance: finalWalkDistance,
+        fare: finalWalkFare,
+      };
+
+      const firstTransportSegment = {
+        type: bestSourceRoute.mode,
+        from: bestSourceNearestPoint,
+        to: bestTransferPoint,
+        route: bestSourceRoute,
+        color: bestSourceRoute.color,
+        distance: firstTransportDistance,
+        fare: firstTransportFare,
+      };
+
+      const secondTransportSegment = {
+        type: bestDestRoute.mode,
+        from: bestTransferPoint,
+        to: bestDestNearestPoint,
+        route: bestDestRoute,
+        color: bestDestRoute.color,
+        distance: secondTransportDistance,
+        fare: secondTransportFare,
+      };
+
+      const totalFare =
+        initialWalkFare +
+        firstTransportFare +
+        secondTransportFare +
+        finalWalkFare;
+
+      setCurrentRoute({
+        segments: [
+          initialWalk,
+          firstTransportSegment,
+          secondTransportSegment,
+          finalWalk,
+        ],
+        totalDistance: minTotalDistance,
+        totalTime:
+          (sourceResult.distance + destResult.distance) / 1.4 +
+          calculateDistance(bestSourceNearestPoint, bestTransferPoint) /
+            getSpeed(bestSourceRoute.mode) +
+          calculateDistance(bestTransferPoint, bestDestNearestPoint) /
+            getSpeed(bestDestRoute.mode),
+        totalFare: totalFare,
+      });
+
+      setTransferPoints([
+        {
+          position: bestSourceNearestPoint,
+          type: "boarding",
+          route: bestSourceRoute.name,
+        },
+        {
+          position: bestTransferPoint,
+          type: "transfer",
+          route1: bestSourceRoute.name,
+          route2: bestDestRoute.name,
+        },
+        {
+          position: bestDestNearestPoint,
+          type: "alighting",
+          route: bestDestRoute.name,
+        },
+      ]);
+
+      setMapBounds([
+        source,
+        bestSourceNearestPoint,
+        bestTransferPoint,
+        bestDestNearestPoint,
+        destination,
+      ]);
+
+      setRouteFound(true);
+      setLoading(false);
+      return;
+    }
+
+    const initialWalkDistance = sourceResult.distance;
+    const transferWalkDistance = calculateDistance(
+      sourceResult.point,
+      destResult.point
+    );
+    const finalWalkDistance = destResult.distance;
+
+    const initialWalkFare = calculateFare("walk", initialWalkDistance);
+    const transferWalkFare = calculateFare("walk", transferWalkDistance);
+    const finalWalkFare = calculateFare("walk", finalWalkDistance);
+    const firstTransportFare = calculateFare(sourceResult.route.mode, 0);
+    const secondTransportFare = calculateFare(destResult.route.mode, 0);
+
+    const initialWalk = {
+      type: "walk",
+      from: source,
+      to: sourceResult.point,
+      color: modeColors.walk,
+      distance: initialWalkDistance,
+      fare: initialWalkFare,
+    };
+
+    const transferWalk = {
+      type: "walk",
+      from: sourceResult.point,
+      to: destResult.point,
+      color: modeColors.walk,
+      distance: transferWalkDistance,
+      fare: transferWalkFare,
+    };
+
+    const finalWalk = {
+      type: "walk",
+      from: destResult.point,
+      to: destination,
+      color: modeColors.walk,
+      distance: finalWalkDistance,
+      fare: finalWalkFare,
+    };
+
+    const firstTransportSegment = {
+      type: sourceResult.route.mode,
+      from: sourceResult.point,
+      to: sourceResult.point,
+      route: sourceResult.route,
+      color: sourceResult.route.color,
+      distance: 0,
+      fare: firstTransportFare,
+    };
+
+    const secondTransportSegment = {
+      type: destResult.route.mode,
+      from: destResult.point,
+      to: destResult.point,
+      route: destResult.route,
+      color: destResult.route.color,
+      distance: 0,
+      fare: secondTransportFare,
+    };
+
+    const totalFare =
+      initialWalkFare +
+      firstTransportFare +
+      transferWalkFare +
+      secondTransportFare +
+      finalWalkFare;
+
+    setCurrentRoute({
+      segments: [
+        initialWalk,
+        firstTransportSegment,
+        transferWalk,
+        secondTransportSegment,
+        finalWalk,
+      ],
+      totalDistance:
+        sourceResult.distance +
+        calculateDistance(sourceResult.point, destResult.point) +
+        destResult.distance,
+      totalTime:
+        (sourceResult.distance + destResult.distance) / 1.4 +
+        calculateDistance(sourceResult.point, destResult.point) / 1.4,
+      totalFare: totalFare,
+    });
+
+    setTransferPoints([
+      {
+        position: sourceResult.point,
+        type: "boarding",
+        route: sourceResult.route.name,
+      },
+      {
+        position: destResult.point,
+        type: "alighting",
+        route: destResult.route.name,
+      },
+    ]);
+
+    setMapBounds([source, sourceResult.point, destResult.point, destination]);
+
+    setRouteFound(true);
+    setLoading(false);
   };
 
-  const mapView = getMapView();
+  const getSpeed = (mode) => {
+    switch (mode) {
+      case "train":
+        return 13.9;
+      case "bus":
+        return 8.3;
+      case "jeep":
+        return 6.9;
+      case "ferry":
+        return 5.6;
+      case "tricycle":
+        return 5.6;
+      case "walk":
+        return 1.4;
+      default:
+        return 8.3;
+    }
+  };
+
+  const formatTime = (seconds) => {
+    const minutes = Math.round(seconds / 60);
+    return `${minutes} min`;
+  };
+
+  const formatDistance = (meters) => {
+    if (meters < 1000) {
+      return `${Math.round(meters)} m`;
+    } else {
+      return `${(meters / 1000).toFixed(1)} km`;
+    }
+  };
+
+  const handleWalkingRouteGenerated = (routeIndex, walkingRoute) => {
+    setWalkingRoutes((prev) => {
+      const newWalkingRoutes = [...prev];
+
+      const walkingFare = calculateFare("walk", walkingRoute.distance);
+      walkingRoute.fare = walkingFare;
+
+      newWalkingRoutes[routeIndex] = walkingRoute;
+
+      if (currentRoute) {
+        const updatedSegments = [...currentRoute.segments];
+
+        if (updatedSegments[routeIndex]) {
+          updatedSegments[routeIndex] = {
+            ...updatedSegments[routeIndex],
+            distance: walkingRoute.distance,
+            fare: walkingFare,
+          };
+        }
+
+        const totalFare = updatedSegments.reduce(
+          (sum, segment) => sum + (segment.fare || 0),
+          0
+        );
+
+        setCurrentRoute({
+          ...currentRoute,
+          segments: updatedSegments,
+          totalFare: totalFare,
+        });
+      }
+
+      return newWalkingRoutes;
+    });
+  };
+
+  useEffect(() => {
+    if (source && destination && routeData && routeData.length > 0) {
+      findRoute();
+    }
+  }, [source, destination, routeData]);
+
+  const getModeIcon = (mode) => {
+    switch (mode) {
+      case "train":
+        return "🚆";
+      case "bus":
+        return "🚌";
+      case "jeep":
+        return "🚐";
+      case "ferry":
+        return "⛴️";
+      case "tricycle":
+        return "🛺";
+      case "walk":
+        return "🚶";
+      default:
+        return "🚌";
+    }
+  };
 
   return (
-    <div style={{ display: "flex" }}>
-      {/* Sidebar */}
-      <div
-        style={{
-          width: "25%",
-          height: "100vh",
-          overflowY: "auto",
-          padding: "10px",
-          borderRight: "1px solid #ccc",
-          backgroundColor: "#f8f8f8",
-        }}
-      >
-        <h2
-          style={{
-            borderBottom: "2px solid #0078d7",
-            paddingBottom: "8px",
-            color: "#333",
-          }}
+    <div className="relative w-full h-screen flex">
+      <div className="relative w-3/4 h-screen">
+        {loading && (
+          <div className="absolute inset-0 flex items-center justify-center bg-white bg-opacity-75 z-10">
+            <p className="text-lg font-semibold">Loading map data...</p>
+          </div>
+        )}
+
+        {error && (
+          <div className="absolute inset-0 flex items-center justify-center bg-white bg-opacity-75 z-10">
+            <div className="text-red-500 p-4 bg-red-50 rounded-lg">
+              <p className="font-semibold">Error</p>
+              <p>{error}</p>
+            </div>
+          </div>
+        )}
+
+        <MapContainer
+          center={defaultCenter}
+          zoom={12}
+          style={{ height: "100%", width: "100%" }}
+          className="z-0"
         >
-          Commute Guide
-        </h2>
+          <TileLayer
+            url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          />
 
-        {origin && destination && (
-          <div
-            style={{
-              marginBottom: "20px",
-              padding: "15px",
-              backgroundColor: "#fff",
-              borderRadius: "8px",
-              boxShadow: "0 2px 4px rgba(0,0,0,0.1)",
-            }}
-          >
-            <h3 style={{ margin: "0 0 10px 0", color: "#0078d7" }}>
-              Trip Details
-            </h3>
-            <p>
-              <strong>From:</strong> {origin.lat.toFixed(6)},{" "}
-              {origin.lng.toFixed(6)}
-            </p>
-            <p>
-              <strong>To:</strong> {destination.lat.toFixed(6)},{" "}
-              {destination.lng.toFixed(6)}
-            </p>
+          {mapBounds.length > 0 && <MapViewSetter bounds={mapBounds} />}
 
-            {loading ? (
-              <div style={{ textAlign: "center", padding: "20px" }}>
-                Loading routes...
-              </div>
-            ) : suggestedRoutes.length > 0 ? (
-              <div style={{ marginTop: "15px" }}>
-                <h4
-                  style={{
-                    borderBottom: "1px solid #eee",
-                    paddingBottom: "5px",
-                  }}
-                >
-                  Suggested Routes
-                </h4>
-                {suggestedRoutes.map((route, index) => (
-                  <div
-                    key={`route-${index}`}
-                    style={{
-                      padding: "12px",
-                      margin: "10px 0",
-                      cursor: "pointer",
-                      backgroundColor:
-                        selectedRoute === route ? "#e6f7ff" : "#f9f9f9",
-                      borderRadius: "6px",
-                      boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
-                      borderLeft:
-                        selectedRoute === route
-                          ? "4px solid #0078d7"
-                          : "4px solid transparent",
-                    }}
-                    onClick={() => handleRouteSelect(route)}
-                  >
-                    <div style={{ fontWeight: "bold", marginBottom: "5px" }}>
-                      Option {index + 1}: {route.name}
+          {source && (
+            <Marker position={source} icon={sourceIcon}>
+              <Popup>Starting Point</Popup>
+            </Marker>
+          )}
+
+          {destination && (
+            <Marker position={destination} icon={destinationIcon}>
+              <Popup>Destination</Popup>
+            </Marker>
+          )}
+
+          {transferPoints.map((point, idx) => (
+            <Marker
+              key={`transfer-${idx}`}
+              position={point.position}
+              icon={transferIcon}
+            >
+              <Popup>
+                {point.type === "boarding" && `Board ${point.route}`}
+                {point.type === "alighting" && `Alight from ${point.route}`}
+                {point.type === "transfer" &&
+                  `Transfer from ${point.route1} to ${point.route2}`}
+              </Popup>
+            </Marker>
+          ))}
+
+          {!routeFound && geojsonData && (
+            <GeoJSON
+              data={geojsonData}
+              style={(feature) => ({
+                color: getColor(feature),
+                weight: 3,
+                opacity: 0.5,
+                fillOpacity: 0.2,
+              })}
+              onEachFeature={(feature, layer) => {
+                if (feature.properties) {
+                  const { name, route, operator, ref, from, to, via } =
+                    feature.properties;
+                  const mode = extractModeFromName(name);
+
+                  layer.bindPopup(`
+                    <div>
+                      <strong>${name || "Unnamed Route"}</strong>
+                      <p>Mode: <span style="text-transform: capitalize">${mode}</span></p>
+                      ${ref ? `<p>Route Number: ${ref}</p>` : ""}
+                      ${from && to ? `<p>From: ${from} → To: ${to}</p>` : ""}
+                      ${via ? `<p>Via: ${via}</p>` : ""}
+                      ${operator ? `<p>Operator: ${operator}</p>` : ""}
                     </div>
-                    <div style={{ fontSize: "13px", color: "#666" }}>
-                      {route.description}
+                  `);
+                }
+              }}
+            />
+          )}
+
+          {currentRoute &&
+            currentRoute.segments.map((segment, idx) => {
+              if (segment.type === "walk") {
+                return (
+                  <WalkingRoute
+                    key={`walking-${idx}`}
+                    from={segment.from}
+                    to={segment.to}
+                    color={segment.color}
+                    onRouteGenerated={(route) =>
+                      handleWalkingRouteGenerated(idx, route)
+                    }
+                  />
+                );
+              } else if (segment.coordinates) {
+                return (
+                  <Polyline
+                    key={`segment-${idx}`}
+                    positions={segment.coordinates}
+                    color={segment.color}
+                    weight={5}
+                    opacity={0.7}
+                  />
+                );
+              } else {
+                return (
+                  <Polyline
+                    key={`segment-${idx}`}
+                    positions={[segment.from, segment.to]}
+                    color={segment.color}
+                    weight={5}
+                    opacity={0.7}
+                    dashArray="10,10"
+                  />
+                );
+              }
+            })}
+        </MapContainer>
+      </div>
+
+      <div className="w-1/4 h-screen p-4 bg-white shadow-lg overflow-y-auto">
+        <h2 className="text-xl font-bold mb-4">Commute Guide</h2>
+
+        {!source || !destination ? (
+          <div className="p-4 bg-yellow-50 rounded-lg">
+            <p>Please set source and destination coordinates in the URL.</p>
+            <p className="text-sm text-gray-600 mt-2">
+              Example: ?srcLat=14.59&srcLng=120.98&destLat=14.62&destLng=120.96
+            </p>
+          </div>
+        ) : !routeFound ? (
+          <div className="p-4 bg-blue-50 rounded-lg">
+            <p>Finding the best route for you...</p>
+          </div>
+        ) : (
+          <>
+            <div className="mb-4 p-4 bg-gray-50 rounded-lg">
+              <h3 className="font-semibold">Summary</h3>
+              <p>
+                Total Distance: {formatDistance(currentRoute.totalDistance)}
+              </p>
+              <p>Estimated Time: {formatTime(currentRoute.totalTime)}</p>
+              <p>Total Fare: {formatFare(currentRoute.totalFare || 0)}</p>
+              <p>
+                Transfers:{" "}
+                {transferPoints.filter((p) => p.type === "transfer").length}
+              </p>
+            </div>
+
+            <div className="mb-4">
+              <h3 className="font-semibold mb-2">Step-by-Step Instructions</h3>
+              <ol className="list-decimal pl-5 space-y-4">
+                {currentRoute.segments.map((segment, idx) => (
+                  <li key={`step-${idx}`} className="border-b pb-2">
+                    <div className="flex items-center mb-2">
+                      <span
+                        className="w-6 h-6 rounded-full mr-2 flex items-center justify-center text-white"
+                        style={{ backgroundColor: segment.color }}
+                      >
+                        {getModeIcon(segment.type)}
+                      </span>
+                      <span className="font-medium capitalize">
+                        {segment.type}
+                      </span>
+                      <span className="ml-auto text-blue-600 font-medium">
+                        {formatFare(segment.fare || 0)}
+                      </span>
                     </div>
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        marginTop: "10px",
-                        fontSize: "12px",
-                      }}
-                    >
-                      <span>🕒 {formatDuration(route.totalDuration)}</span>
-                      <span>📏 {route.totalDistance.toFixed(2)} km</span>
-                      <span>🔄 {route.transfers} transfers</span>
-                    </div>
+
+                    {segment.type === "walk" ? (
+                      <p>
+                        Walk{" "}
+                        {formatDistance(
+                          walkingRoutes[idx]?.distance ||
+                            segment.distance ||
+                            calculateDistance(segment.from, segment.to)
+                        )}
+                        {idx === 0 &&
+                          " to reach " +
+                            (currentRoute.segments[1]?.route?.name ||
+                              "your route")}
+                        {idx > 0 &&
+                          idx < currentRoute.segments.length - 1 &&
+                          " to transfer to " +
+                            (currentRoute.segments[idx + 1]?.route?.name ||
+                              "your next route")}
+                        {idx === currentRoute.segments.length - 1 &&
+                          " to reach your destination"}
+                      </p>
+                    ) : (
+                      <p>
+                        Take {segment.route.name}{" "}
+                        {segment.route.properties?.ref
+                          ? `(${segment.route.properties.ref})`
+                          : ""}
+                        {segment.route.properties?.from &&
+                        segment.route.properties?.to
+                          ? ` from ${segment.route.properties.from} to ${segment.route.properties.to}`
+                          : ""}
+                      </p>
+                    )}
+
+                    {walkingRoutes[idx]?.instructions &&
+                      segment.type === "walk" && (
+                        <ul className="text-sm text-gray-600 mt-2 list-disc pl-5">
+                          {walkingRoutes[idx].instructions
+                            .slice(0, -1)
+                            .map((instruction, insIdx) => (
+                              <li key={`instruction-${idx}-${insIdx}`}>
+                                {instruction.text}
+                              </li>
+                            ))}
+                        </ul>
+                      )}
+                  </li>
+                ))}
+              </ol>
+            </div>
+
+            <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+              <h3 className="font-semibold mb-2">Legend</h3>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                {Object.entries(modeColors).map(([mode, color]) => (
+                  <div key={mode} className="flex items-center">
+                    <span
+                      className="inline-block w-4 h-4 mr-1 rounded-sm"
+                      style={{ backgroundColor: color }}
+                    ></span>
+                    <span className="text-xs capitalize">{mode}</span>
                   </div>
                 ))}
               </div>
-            ) : (
-              <div
-                style={{ textAlign: "center", padding: "20px", color: "#666" }}
-              >
-                No routes found. Try a different origin or destination.
-              </div>
-            )}
-          </div>
+            </div>
+          </>
         )}
-
-        <div style={{ marginTop: "20px" }}>
-          <h3 style={{ borderBottom: "1px solid #ddd", paddingBottom: "5px" }}>
-            Transport Legend
-          </h3>
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "8px",
-              marginTop: "10px",
-            }}
-          >
-            {Object.entries(TRANSPORT_COLORS).map(([mode, color]) => (
-              <div
-                key={mode}
-                style={{ display: "flex", alignItems: "center", gap: "8px" }}
-              >
-                <div
-                  style={{
-                    width: "20px",
-                    height: "4px",
-                    backgroundColor: color,
-                    borderRadius: "2px",
-                  }}
-                ></div>
-                <span style={{ textTransform: "capitalize" }}>{mode}</span>
-              </div>
-            ))}
-          </div>
-        </div>
       </div>
-
-      {/* Map */}
-      <MapContainer
-        key={mapKey}
-        center={mapView.center}
-        zoom={mapView.zoom}
-        style={{ height: "100vh", width: "75%" }}
-      >
-        <TileLayer
-          url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-        />
-
-        {/* Show origin and destination markers */}
-        {origin && (
-          <Marker position={[origin.lat, origin.lng]}>
-            <Popup>Origin</Popup>
-          </Marker>
-        )}
-
-        {destination && (
-          <Marker position={[destination.lat, destination.lng]}>
-            <Popup>Destination</Popup>
-          </Marker>
-        )}
-
-        {/* Show selected route segments */}
-        {selectedRoute &&
-          selectedRoute.segments.map((segment, index) => {
-            const transportMode = segment.properties.transportMode || "walk";
-            const color = TRANSPORT_COLORS[transportMode] || "#999";
-
-            if (segment.geometry.type === "LineString") {
-              const positions = segment.geometry.coordinates.map((coord) => [
-                coord[1],
-                coord[0],
-              ]);
-              return (
-                <Polyline
-                  key={`segment-${index}`}
-                  positions={positions}
-                  color={color}
-                  weight={5}
-                  opacity={0.8}
-                >
-                  <Popup>
-                    <div>
-                      <strong>{transportMode.toUpperCase()}</strong>
-                      <div>{segment.properties.name}</div>
-                      <div>
-                        Distance:{" "}
-                        {segment.properties.distance?.toFixed(2) ||
-                          segment.properties.length?.toFixed(2) ||
-                          "?"}{" "}
-                        km
-                      </div>
-                    </div>
-                  </Popup>
-                </Polyline>
-              );
-            } else if (segment.geometry.type === "MultiLineString") {
-              return segment.geometry.coordinates.map((line, lineIndex) => {
-                const positions = line.map((coord) => [coord[1], coord[0]]);
-                return (
-                  <Polyline
-                    key={`segment-${index}-line-${lineIndex}`}
-                    positions={positions}
-                    color={color}
-                    weight={10}
-                    opacity={0.8}
-                  >
-                    <Popup>
-                      <div>
-                        <strong>{transportMode.toUpperCase()}</strong>
-                        <div>{segment.properties.name}</div>
-                        <div>
-                          Distance:{" "}
-                          {segment.properties.distance?.toFixed(2) ||
-                            segment.properties.length?.toFixed(2) ||
-                            "?"}{" "}
-                          km
-                        </div>
-                      </div>
-                    </Popup>
-                  </Polyline>
-                );
-              });
-            }
-            return null;
-          })}
-      </MapContainer>
     </div>
   );
 };
 
-export default CommuteGuide;
+export default TransportRoutesMap;
