@@ -50,6 +50,13 @@ const modeColors = {
   other: "#607d8b",
 };
 
+// Mode preferences for diverse route generation
+const modePreferences = [
+  ["train", "bus", "jeep", "ferry", "tricycle", "walk", "other"], // Default - prefers trains
+  ["bus", "jeep", "ferry", "train", "tricycle", "walk", "other"], // Bus preference
+  ["jeep", "ferry", "tricycle", "bus", "train", "walk", "other"], // Local transport preference
+];
+
 const MapViewSetter = ({ bounds }) => {
   const map = useMap();
 
@@ -124,10 +131,13 @@ const TransportRoutesMap = () => {
   const [source, setSource] = useState(null);
   const [destination, setDestination] = useState(null);
   const [routeFound, setRouteFound] = useState(false);
-  const [currentRoute, setCurrentRoute] = useState(null);
+
+  // Modified states for multiple route options
+  const [routeOptions, setRouteOptions] = useState([]);
+  const [currentRouteIndex, setCurrentRouteIndex] = useState(0);
+  const [allTransferPoints, setAllTransferPoints] = useState([]);
+  const [allWalkingRoutes, setAllWalkingRoutes] = useState([]);
   const [mapBounds, setMapBounds] = useState([]);
-  const [walkingRoutes, setWalkingRoutes] = useState([]);
-  const [transferPoints, setTransferPoints] = useState([]);
 
   const defaultCenter = [14.5995, 120.9842];
 
@@ -293,6 +303,7 @@ const TransportRoutesMap = () => {
     return distance;
   };
 
+  // Modified to accept a preferredMode parameter for diverse routes
   const findNearestPointOnRoute = (coordinate, route) => {
     if (!route || !route.coordinates || route.coordinates.length === 0) {
       return null;
@@ -314,7 +325,13 @@ const TransportRoutesMap = () => {
     return { point: nearestPoint, distance: minDistance, index: pointIndex };
   };
 
-  const findNearestRoute = (coordinate, routes) => {
+  // Modified to prioritize routes by mode preferences
+  const findNearestRoute = (
+    coordinate,
+    routes,
+    modePreference = modePreferences[0],
+    excludeRouteIds = []
+  ) => {
     if (!routes || routes.length === 0) {
       return null;
     }
@@ -324,7 +341,18 @@ const TransportRoutesMap = () => {
     let nearestPoint = null;
     let pointIndex = -1;
 
-    routes.forEach((route) => {
+    // First sort routes by preference
+    const sortedRoutes = [...routes].sort((a, b) => {
+      const aIndex = modePreference.indexOf(a.mode);
+      const bIndex = modePreference.indexOf(b.mode);
+      return aIndex - bIndex;
+    });
+
+    // Then find nearest point considering excluded routes
+    sortedRoutes.forEach((route) => {
+      // Skip excluded routes
+      if (excludeRouteIds.includes(route.id)) return;
+
       const result = findNearestPointOnRoute(coordinate, route);
       if (result && result.distance < minDistance) {
         minDistance = result.distance;
@@ -342,393 +370,491 @@ const TransportRoutesMap = () => {
     };
   };
 
+  // Modified findRoute to calculate multiple route options
   const findRoute = () => {
     if (!source || !destination || !routeData || routeData.length === 0) {
       return;
     }
 
     setLoading(true);
+    const foundRoutes = [];
+    const allTransfers = [];
+    const allWalking = [];
 
-    const directDistance = calculateDistance(source, destination);
+    // Try to find 3 distinct routes using different mode preferences
+    for (let prefIndex = 0; prefIndex < modePreferences.length; prefIndex++) {
+      const modePreference = modePreferences[prefIndex];
+      const excludeRouteIds = foundRoutes.flatMap((route) =>
+        route.segments.filter((seg) => seg.route).map((seg) => seg.route.id)
+      );
 
-    if (directDistance <= 500) {
-      const walkingFare = calculateFare("walk", directDistance);
+      // Direct walking route (only calculate once)
+      if (prefIndex === 0) {
+        const directDistance = calculateDistance(source, destination);
+        if (directDistance <= 500) {
+          const walkingFare = calculateFare("walk", directDistance);
 
-      setCurrentRoute({
-        segments: [
+          const route = {
+            segments: [
+              {
+                type: "walk",
+                from: source,
+                to: destination,
+                color: modeColors.walk,
+                distance: directDistance,
+                fare: walkingFare,
+              },
+            ],
+            totalDistance: directDistance,
+            totalTime: directDistance / 1.4,
+            totalFare: walkingFare,
+            label: "Walking Route",
+          };
+
+          foundRoutes.push(route);
+          allWalking.push([]);
+          allTransfers.push([]);
+
+          // Only one walking route makes sense
+          break;
+        }
+      }
+
+      // Skip route calculation if we already have 3 routes
+      if (foundRoutes.length >= 3) break;
+
+      // Find nearest routes with mode preference
+      const sourceResult = findNearestRoute(
+        source,
+        routeData,
+        modePreference,
+        excludeRouteIds
+      );
+      if (!sourceResult) continue;
+
+      const destResult = findNearestRoute(
+        destination,
+        routeData,
+        modePreference,
+        excludeRouteIds
+      );
+      if (!destResult) continue;
+
+      // If both source and destination are on the same route
+      if (sourceResult.route.id === destResult.route.id) {
+        const sourceIndex = sourceResult.index;
+        const destIndex = destResult.index;
+        const routeCoords = sourceResult.route.coordinates;
+
+        let routeSegment;
+        let routeSegmentDistance = 0;
+
+        if (sourceIndex <= destIndex) {
+          routeSegment = routeCoords.slice(sourceIndex, destIndex + 1);
+        } else {
+          routeSegment = routeCoords
+            .slice(destIndex, sourceIndex + 1)
+            .reverse();
+        }
+
+        for (let i = 0; i < routeSegment.length - 1; i++) {
+          routeSegmentDistance += calculateDistance(
+            routeSegment[i],
+            routeSegment[i + 1]
+          );
+        }
+
+        const initialWalkFare = calculateFare("walk", sourceResult.distance);
+        const transportFare = calculateFare(
+          sourceResult.route.mode,
+          routeSegmentDistance
+        );
+        const finalWalkFare = calculateFare("walk", destResult.distance);
+
+        const initialWalk = {
+          type: "walk",
+          from: source,
+          to: sourceResult.point,
+          color: modeColors.walk,
+          distance: sourceResult.distance,
+          fare: initialWalkFare,
+        };
+
+        const finalWalk = {
+          type: "walk",
+          from: destResult.point,
+          to: destination,
+          color: modeColors.walk,
+          distance: destResult.distance,
+          fare: finalWalkFare,
+        };
+
+        const transportSegment = {
+          type: sourceResult.route.mode,
+          from: sourceResult.point,
+          to: destResult.point,
+          route: sourceResult.route,
+          color: sourceResult.route.color,
+          coordinates: routeSegment,
+          distance: routeSegmentDistance,
+          fare: transportFare,
+        };
+
+        const totalFare = initialWalkFare + transportFare + finalWalkFare;
+        const totalDistance =
+          sourceResult.distance + routeSegmentDistance + destResult.distance;
+        const totalTime =
+          (sourceResult.distance + destResult.distance) / 1.4 +
+          routeSegmentDistance / getSpeed(sourceResult.route.mode);
+
+        foundRoutes.push({
+          segments: [initialWalk, transportSegment, finalWalk],
+          totalDistance,
+          totalTime,
+          totalFare,
+          label: `${
+            sourceResult.route.mode.charAt(0).toUpperCase() +
+            sourceResult.route.mode.slice(1)
+          } Route`,
+        });
+
+        allTransfers.push([
           {
+            position: sourceResult.point,
+            type: "boarding",
+            route: sourceResult.route.name,
+          },
+          {
+            position: destResult.point,
+            type: "alighting",
+            route: sourceResult.route.name,
+          },
+        ]);
+
+        allWalking.push([]);
+      }
+      // Need to find transfer routes
+      else {
+        // Try to find a transfer route, skipping already used routes
+        let minTotalDistance = Infinity;
+        let bestSourceRoute = null;
+        let bestDestRoute = null;
+        let bestTransferPoint = null;
+        let bestSourceNearestPoint = null;
+        let bestDestNearestPoint = null;
+
+        // Try to find different transfer routes (more distinct options)
+        const routesToTry = routeData.filter(
+          (r) => !excludeRouteIds.includes(r.id)
+        );
+
+        routesToTry.forEach((route) => {
+          if (route.coordinates.length < 2) return;
+
+          if (
+            route.id === sourceResult.route.id ||
+            route.id === destResult.route.id
+          )
+            return;
+
+          const sourceRouteResult = findNearestRoute(sourceResult.point, [
+            route,
+          ]);
+          const destRouteResult = findNearestRoute(destResult.point, [route]);
+
+          if (!sourceRouteResult || !destRouteResult) return;
+
+          const totalDistance =
+            sourceResult.distance +
+            calculateDistance(sourceResult.point, sourceRouteResult.point) +
+            calculateDistance(sourceRouteResult.point, destRouteResult.point) +
+            destResult.distance;
+
+          if (totalDistance < minTotalDistance) {
+            minTotalDistance = totalDistance;
+            bestSourceRoute = sourceResult.route;
+            bestDestRoute = destResult.route;
+            bestTransferPoint = sourceRouteResult.point;
+            bestSourceNearestPoint = sourceResult.point;
+            bestDestNearestPoint = destResult.point;
+          }
+        });
+
+        if (bestTransferPoint) {
+          const initialWalkDistance = sourceResult.distance;
+          const finalWalkDistance = destResult.distance;
+          const firstTransportDistance = calculateDistance(
+            bestSourceNearestPoint,
+            bestTransferPoint
+          );
+          const secondTransportDistance = calculateDistance(
+            bestTransferPoint,
+            bestDestNearestPoint
+          );
+
+          const initialWalkFare = calculateFare("walk", initialWalkDistance);
+          const finalWalkFare = calculateFare("walk", finalWalkDistance);
+          const firstTransportFare = calculateFare(
+            bestSourceRoute.mode,
+            firstTransportDistance
+          );
+          const secondTransportFare = calculateFare(
+            bestDestRoute.mode,
+            secondTransportDistance
+          );
+
+          const initialWalk = {
             type: "walk",
             from: source,
+            to: bestSourceNearestPoint,
+            color: modeColors.walk,
+            distance: initialWalkDistance,
+            fare: initialWalkFare,
+          };
+
+          const finalWalk = {
+            type: "walk",
+            from: bestDestNearestPoint,
             to: destination,
             color: modeColors.walk,
-            distance: directDistance,
-            fare: walkingFare,
-          },
-        ],
-        totalDistance: directDistance,
-        totalTime: directDistance / 1.4,
-        totalFare: walkingFare,
-      });
+            distance: finalWalkDistance,
+            fare: finalWalkFare,
+          };
 
-      setMapBounds([source, destination]);
-      setRouteFound(true);
-      setLoading(false);
-      return;
+          const firstTransportSegment = {
+            type: bestSourceRoute.mode,
+            from: bestSourceNearestPoint,
+            to: bestTransferPoint,
+            route: bestSourceRoute,
+            color: bestSourceRoute.color,
+            distance: firstTransportDistance,
+            fare: firstTransportFare,
+          };
+
+          const secondTransportSegment = {
+            type: bestDestRoute.mode,
+            from: bestTransferPoint,
+            to: bestDestNearestPoint,
+            route: bestDestRoute,
+            color: bestDestRoute.color,
+            distance: secondTransportDistance,
+            fare: secondTransportFare,
+          };
+
+          const totalFare =
+            initialWalkFare +
+            firstTransportFare +
+            secondTransportFare +
+            finalWalkFare;
+
+          foundRoutes.push({
+            segments: [
+              initialWalk,
+              firstTransportSegment,
+              secondTransportSegment,
+              finalWalk,
+            ],
+            totalDistance: minTotalDistance,
+            totalTime:
+              (sourceResult.distance + destResult.distance) / 1.4 +
+              calculateDistance(bestSourceNearestPoint, bestTransferPoint) /
+                getSpeed(bestSourceRoute.mode) +
+              calculateDistance(bestTransferPoint, bestDestNearestPoint) /
+                getSpeed(bestDestRoute.mode),
+            totalFare: totalFare,
+            label: `${
+              bestSourceRoute.mode.charAt(0).toUpperCase() +
+              bestSourceRoute.mode.slice(1)
+            } to ${
+              bestDestRoute.mode.charAt(0).toUpperCase() +
+              bestDestRoute.mode.slice(1)
+            }`,
+          });
+
+          allTransfers.push([
+            {
+              position: bestSourceNearestPoint,
+              type: "boarding",
+              route: bestSourceRoute.name,
+            },
+            {
+              position: bestTransferPoint,
+              type: "transfer",
+              route1: bestSourceRoute.name,
+              route2: bestDestRoute.name,
+            },
+            {
+              position: bestDestNearestPoint,
+              type: "alighting",
+              route: bestDestRoute.name,
+            },
+          ]);
+
+          allWalking.push([]);
+        } else {
+          // If no transfer found, just try walking between routes
+          const initialWalkDistance = sourceResult.distance;
+          const transferWalkDistance = calculateDistance(
+            sourceResult.point,
+            destResult.point
+          );
+          const finalWalkDistance = destResult.distance;
+
+          const initialWalkFare = calculateFare("walk", initialWalkDistance);
+          const transferWalkFare = calculateFare("walk", transferWalkDistance);
+          const finalWalkFare = calculateFare("walk", finalWalkDistance);
+          const firstTransportFare = calculateFare(sourceResult.route.mode, 0);
+          const secondTransportFare = calculateFare(destResult.route.mode, 0);
+
+          const initialWalk = {
+            type: "walk",
+            from: source,
+            to: sourceResult.point,
+            color: modeColors.walk,
+            distance: initialWalkDistance,
+            fare: initialWalkFare,
+          };
+
+          const transferWalk = {
+            type: "walk",
+            from: sourceResult.point,
+            to: destResult.point,
+            color: modeColors.walk,
+            distance: transferWalkDistance,
+            fare: transferWalkFare,
+          };
+
+          const finalWalk = {
+            type: "walk",
+            from: destResult.point,
+            to: destination,
+            color: modeColors.walk,
+            distance: finalWalkDistance,
+            fare: finalWalkFare,
+          };
+
+          const firstTransportSegment = {
+            type: sourceResult.route.mode,
+            from: sourceResult.point,
+            to: sourceResult.point,
+            route: sourceResult.route,
+            color: sourceResult.route.color,
+            distance: 0,
+            fare: firstTransportFare,
+          };
+
+          const secondTransportSegment = {
+            type: destResult.route.mode,
+            from: destResult.point,
+            to: destResult.point,
+            route: destResult.route,
+            color: destResult.route.color,
+            distance: 0,
+            fare: secondTransportFare,
+          };
+
+          const totalFare =
+            initialWalkFare +
+            firstTransportFare +
+            transferWalkFare +
+            secondTransportFare +
+            finalWalkFare;
+
+          foundRoutes.push({
+            segments: [
+              initialWalk,
+              firstTransportSegment,
+              transferWalk,
+              secondTransportSegment,
+              finalWalk,
+            ],
+            totalDistance:
+              sourceResult.distance +
+              calculateDistance(sourceResult.point, destResult.point) +
+              destResult.distance,
+            totalTime:
+              (sourceResult.distance + destResult.distance) / 1.4 +
+              calculateDistance(sourceResult.point, destResult.point) / 1.4,
+            totalFare: totalFare,
+            label: `Mixed Route (${sourceResult.route.mode}/${destResult.route.mode})`,
+          });
+
+          allTransfers.push([
+            {
+              position: sourceResult.point,
+              type: "boarding",
+              route: sourceResult.route.name,
+            },
+            {
+              position: destResult.point,
+              type: "alighting",
+              route: destResult.route.name,
+            },
+          ]);
+
+          allWalking.push([]);
+        }
+      }
     }
 
-    const sourceResult = findNearestRoute(source, routeData);
-    const destResult = findNearestRoute(destination, routeData);
+    // Sort routes by totalTime for initial display
+    foundRoutes.sort((a, b) => a.totalTime - b.totalTime);
 
-    if (!sourceResult || !destResult) {
+    // Add descriptive labels based on route characteristics
+    foundRoutes.forEach((route, index) => {
+      if (!route.label) {
+        if (index === 0) route.label = "Fastest Route";
+        else if (
+          route.totalFare <= Math.min(...foundRoutes.map((r) => r.totalFare))
+        )
+          route.label = "Cheapest Route";
+        else if (
+          route.segments.filter((s) => s.type !== "walk").length <=
+          Math.min(
+            ...foundRoutes.map(
+              (r) => r.segments.filter((s) => s.type !== "walk").length
+            )
+          )
+        )
+          route.label = "Simplest Route";
+        else route.label = `Alternative Route ${index + 1}`;
+      }
+    });
+
+    // If we found at least one route
+    if (foundRoutes.length > 0) {
+      // Calculate map bounds for first route
+      const firstRouteBounds = calculateRouteBounds(foundRoutes[0]);
+
+      setRouteOptions(foundRoutes);
+      setAllTransferPoints(allTransfers);
+      setAllWalkingRoutes(allWalking);
+      setCurrentRouteIndex(0);
+      setMapBounds(firstRouteBounds);
+      setRouteFound(true);
+    } else {
       setError("Could not find suitable routes near your locations.");
       setRouteFound(false);
-      setLoading(false);
-      return;
     }
 
-    if (sourceResult.route.id === destResult.route.id) {
-      const sourceIndex = sourceResult.index;
-      const destIndex = destResult.index;
-      const routeCoords = sourceResult.route.coordinates;
-
-      let routeSegment;
-      let routeSegmentDistance = 0;
-
-      if (sourceIndex <= destIndex) {
-        routeSegment = routeCoords.slice(sourceIndex, destIndex + 1);
-      } else {
-        routeSegment = routeCoords.slice(destIndex, sourceIndex + 1).reverse();
-      }
-
-      for (let i = 0; i < routeSegment.length - 1; i++) {
-        routeSegmentDistance += calculateDistance(
-          routeSegment[i],
-          routeSegment[i + 1]
-        );
-      }
-
-      const initialWalkFare = calculateFare("walk", sourceResult.distance);
-      const transportFare = calculateFare(
-        sourceResult.route.mode,
-        routeSegmentDistance
-      );
-      const finalWalkFare = calculateFare("walk", destResult.distance);
-
-      const initialWalk = {
-        type: "walk",
-        from: source,
-        to: sourceResult.point,
-        color: modeColors.walk,
-        distance: sourceResult.distance,
-        fare: initialWalkFare,
-      };
-
-      const finalWalk = {
-        type: "walk",
-        from: destResult.point,
-        to: destination,
-        color: modeColors.walk,
-        distance: destResult.distance,
-        fare: finalWalkFare,
-      };
-
-      const transportSegment = {
-        type: sourceResult.route.mode,
-        from: sourceResult.point,
-        to: destResult.point,
-        route: sourceResult.route,
-        color: sourceResult.route.color,
-        coordinates: routeSegment,
-        distance: routeSegmentDistance,
-        fare: transportFare,
-      };
-
-      const totalFare = initialWalkFare + transportFare + finalWalkFare;
-
-      setCurrentRoute({
-        segments: [initialWalk, transportSegment, finalWalk],
-        totalDistance:
-          sourceResult.distance + routeSegmentDistance + destResult.distance,
-        totalTime:
-          (sourceResult.distance + destResult.distance) / 1.4 +
-          routeSegmentDistance / getSpeed(sourceResult.route.mode),
-        totalFare: totalFare,
-      });
-
-      setTransferPoints([
-        {
-          position: sourceResult.point,
-          type: "boarding",
-          route: sourceResult.route.name,
-        },
-        {
-          position: destResult.point,
-          type: "alighting",
-          route: sourceResult.route.name,
-        },
-      ]);
-
-      setMapBounds([source, ...routeSegment, destination]);
-      setRouteFound(true);
-      setLoading(false);
-      return;
-    }
-
-    let minTotalDistance = Infinity;
-    let bestSourceRoute = null;
-    let bestDestRoute = null;
-    let bestTransferPoint = null;
-    let bestSourceNearestPoint = null;
-    let bestDestNearestPoint = null;
-
-    routeData.forEach((route) => {
-      if (route.coordinates.length < 2) return;
-
-      if (
-        route.id === sourceResult.route.id ||
-        route.id === destResult.route.id
-      )
-        return;
-
-      const sourceRouteResult = findNearestRoute(sourceResult.point, [route]);
-      const destRouteResult = findNearestRoute(destResult.point, [route]);
-
-      if (!sourceRouteResult || !destRouteResult) return;
-
-      const totalDistance =
-        sourceResult.distance +
-        calculateDistance(sourceResult.point, sourceRouteResult.point) +
-        calculateDistance(sourceRouteResult.point, destRouteResult.point) +
-        destResult.distance;
-
-      if (totalDistance < minTotalDistance) {
-        minTotalDistance = totalDistance;
-        bestSourceRoute = sourceResult.route;
-        bestDestRoute = destResult.route;
-        bestTransferPoint = sourceRouteResult.point;
-        bestSourceNearestPoint = sourceResult.point;
-        bestDestNearestPoint = destResult.point;
-      }
-    });
-
-    if (bestTransferPoint) {
-      const initialWalkDistance = sourceResult.distance;
-      const finalWalkDistance = destResult.distance;
-      const firstTransportDistance = calculateDistance(
-        bestSourceNearestPoint,
-        bestTransferPoint
-      );
-      const secondTransportDistance = calculateDistance(
-        bestTransferPoint,
-        bestDestNearestPoint
-      );
-
-      const initialWalkFare = calculateFare("walk", initialWalkDistance);
-      const finalWalkFare = calculateFare("walk", finalWalkDistance);
-      const firstTransportFare = calculateFare(
-        bestSourceRoute.mode,
-        firstTransportDistance
-      );
-      const secondTransportFare = calculateFare(
-        bestDestRoute.mode,
-        secondTransportDistance
-      );
-
-      const initialWalk = {
-        type: "walk",
-        from: source,
-        to: bestSourceNearestPoint,
-        color: modeColors.walk,
-        distance: initialWalkDistance,
-        fare: initialWalkFare,
-      };
-
-      const finalWalk = {
-        type: "walk",
-        from: bestDestNearestPoint,
-        to: destination,
-        color: modeColors.walk,
-        distance: finalWalkDistance,
-        fare: finalWalkFare,
-      };
-
-      const firstTransportSegment = {
-        type: bestSourceRoute.mode,
-        from: bestSourceNearestPoint,
-        to: bestTransferPoint,
-        route: bestSourceRoute,
-        color: bestSourceRoute.color,
-        distance: firstTransportDistance,
-        fare: firstTransportFare,
-      };
-
-      const secondTransportSegment = {
-        type: bestDestRoute.mode,
-        from: bestTransferPoint,
-        to: bestDestNearestPoint,
-        route: bestDestRoute,
-        color: bestDestRoute.color,
-        distance: secondTransportDistance,
-        fare: secondTransportFare,
-      };
-
-      const totalFare =
-        initialWalkFare +
-        firstTransportFare +
-        secondTransportFare +
-        finalWalkFare;
-
-      setCurrentRoute({
-        segments: [
-          initialWalk,
-          firstTransportSegment,
-          secondTransportSegment,
-          finalWalk,
-        ],
-        totalDistance: minTotalDistance,
-        totalTime:
-          (sourceResult.distance + destResult.distance) / 1.4 +
-          calculateDistance(bestSourceNearestPoint, bestTransferPoint) /
-            getSpeed(bestSourceRoute.mode) +
-          calculateDistance(bestTransferPoint, bestDestNearestPoint) /
-            getSpeed(bestDestRoute.mode),
-        totalFare: totalFare,
-      });
-
-      setTransferPoints([
-        {
-          position: bestSourceNearestPoint,
-          type: "boarding",
-          route: bestSourceRoute.name,
-        },
-        {
-          position: bestTransferPoint,
-          type: "transfer",
-          route1: bestSourceRoute.name,
-          route2: bestDestRoute.name,
-        },
-        {
-          position: bestDestNearestPoint,
-          type: "alighting",
-          route: bestDestRoute.name,
-        },
-      ]);
-
-      setMapBounds([
-        source,
-        bestSourceNearestPoint,
-        bestTransferPoint,
-        bestDestNearestPoint,
-        destination,
-      ]);
-
-      setRouteFound(true);
-      setLoading(false);
-      return;
-    }
-
-    const initialWalkDistance = sourceResult.distance;
-    const transferWalkDistance = calculateDistance(
-      sourceResult.point,
-      destResult.point
-    );
-    const finalWalkDistance = destResult.distance;
-
-    const initialWalkFare = calculateFare("walk", initialWalkDistance);
-    const transferWalkFare = calculateFare("walk", transferWalkDistance);
-    const finalWalkFare = calculateFare("walk", finalWalkDistance);
-    const firstTransportFare = calculateFare(sourceResult.route.mode, 0);
-    const secondTransportFare = calculateFare(destResult.route.mode, 0);
-
-    const initialWalk = {
-      type: "walk",
-      from: source,
-      to: sourceResult.point,
-      color: modeColors.walk,
-      distance: initialWalkDistance,
-      fare: initialWalkFare,
-    };
-
-    const transferWalk = {
-      type: "walk",
-      from: sourceResult.point,
-      to: destResult.point,
-      color: modeColors.walk,
-      distance: transferWalkDistance,
-      fare: transferWalkFare,
-    };
-
-    const finalWalk = {
-      type: "walk",
-      from: destResult.point,
-      to: destination,
-      color: modeColors.walk,
-      distance: finalWalkDistance,
-      fare: finalWalkFare,
-    };
-
-    const firstTransportSegment = {
-      type: sourceResult.route.mode,
-      from: sourceResult.point,
-      to: sourceResult.point,
-      route: sourceResult.route,
-      color: sourceResult.route.color,
-      distance: 0,
-      fare: firstTransportFare,
-    };
-
-    const secondTransportSegment = {
-      type: destResult.route.mode,
-      from: destResult.point,
-      to: destResult.point,
-      route: destResult.route,
-      color: destResult.route.color,
-      distance: 0,
-      fare: secondTransportFare,
-    };
-
-    const totalFare =
-      initialWalkFare +
-      firstTransportFare +
-      transferWalkFare +
-      secondTransportFare +
-      finalWalkFare;
-
-    setCurrentRoute({
-      segments: [
-        initialWalk,
-        firstTransportSegment,
-        transferWalk,
-        secondTransportSegment,
-        finalWalk,
-      ],
-      totalDistance:
-        sourceResult.distance +
-        calculateDistance(sourceResult.point, destResult.point) +
-        destResult.distance,
-      totalTime:
-        (sourceResult.distance + destResult.distance) / 1.4 +
-        calculateDistance(sourceResult.point, destResult.point) / 1.4,
-      totalFare: totalFare,
-    });
-
-    setTransferPoints([
-      {
-        position: sourceResult.point,
-        type: "boarding",
-        route: sourceResult.route.name,
-      },
-      {
-        position: destResult.point,
-        type: "alighting",
-        route: destResult.route.name,
-      },
-    ]);
-
-    setMapBounds([source, sourceResult.point, destResult.point, destination]);
-
-    setRouteFound(true);
     setLoading(false);
+  };
+
+  // Helper to calculate bounds for a route
+  const calculateRouteBounds = (route) => {
+    if (!route) return [];
+
+    const points = [source, destination];
+
+    route.segments.forEach((segment) => {
+      if (segment.from) points.push(segment.from);
+      if (segment.to) points.push(segment.to);
+      if (segment.coordinates) {
+        points.push(...segment.coordinates);
+      }
+    });
+
+    return points;
   };
 
   const getSpeed = (mode) => {
@@ -763,21 +889,29 @@ const TransportRoutesMap = () => {
     }
   };
 
-  const handleWalkingRouteGenerated = (routeIndex, walkingRoute) => {
-    setWalkingRoutes((prev) => {
+  const handleWalkingRouteGenerated = (
+    routeIndex,
+    walkingSegmentIndex,
+    walkingRoute
+  ) => {
+    setAllWalkingRoutes((prev) => {
       const newWalkingRoutes = [...prev];
+
+      if (!newWalkingRoutes[routeIndex]) {
+        newWalkingRoutes[routeIndex] = [];
+      }
 
       const walkingFare = calculateFare("walk", walkingRoute.distance);
       walkingRoute.fare = walkingFare;
 
-      newWalkingRoutes[routeIndex] = walkingRoute;
+      newWalkingRoutes[routeIndex][walkingSegmentIndex] = walkingRoute;
 
-      if (currentRoute) {
-        const updatedSegments = [...currentRoute.segments];
+      if (routeOptions[routeIndex]) {
+        const updatedSegments = [...routeOptions[routeIndex].segments];
 
-        if (updatedSegments[routeIndex]) {
-          updatedSegments[routeIndex] = {
-            ...updatedSegments[routeIndex],
+        if (updatedSegments[walkingSegmentIndex]) {
+          updatedSegments[walkingSegmentIndex] = {
+            ...updatedSegments[walkingSegmentIndex],
             distance: walkingRoute.distance,
             fare: walkingFare,
           };
@@ -788,15 +922,26 @@ const TransportRoutesMap = () => {
           0
         );
 
-        setCurrentRoute({
-          ...currentRoute,
+        const updatedRouteOptions = [...routeOptions];
+        updatedRouteOptions[routeIndex] = {
+          ...routeOptions[routeIndex],
           segments: updatedSegments,
           totalFare: totalFare,
-        });
+        };
+
+        setRouteOptions(updatedRouteOptions);
       }
 
       return newWalkingRoutes;
     });
+  };
+
+  // Change currently displayed route
+  const changeSelectedRoute = (index) => {
+    if (index >= 0 && index < routeOptions.length) {
+      setCurrentRouteIndex(index);
+      setMapBounds(calculateRouteBounds(routeOptions[index]));
+    }
   };
 
   useEffect(() => {
@@ -867,7 +1012,7 @@ const TransportRoutesMap = () => {
             </Marker>
           )}
 
-          {transferPoints.map((point, idx) => (
+          {allTransferPoints[currentRouteIndex]?.map((point, idx) => (
             <Marker
               key={`transfer-${idx}`}
               position={point.position}
@@ -912,24 +1057,24 @@ const TransportRoutesMap = () => {
             />
           )}
 
-          {currentRoute &&
-            currentRoute.segments.map((segment, idx) => {
+          {routeOptions[currentRouteIndex] &&
+            routeOptions[currentRouteIndex].segments.map((segment, idx) => {
               if (segment.type === "walk") {
                 return (
                   <WalkingRoute
-                    key={`walking-${idx}`}
+                    key={`walking-${currentRouteIndex}-${idx}`}
                     from={segment.from}
                     to={segment.to}
                     color={segment.color}
                     onRouteGenerated={(route) =>
-                      handleWalkingRouteGenerated(idx, route)
+                      handleWalkingRouteGenerated(currentRouteIndex, idx, route)
                     }
                   />
                 );
               } else if (segment.coordinates) {
                 return (
                   <Polyline
-                    key={`segment-${idx}`}
+                    key={`segment-${currentRouteIndex}-${idx}`}
                     positions={segment.coordinates}
                     color={segment.color}
                     weight={5}
@@ -939,7 +1084,7 @@ const TransportRoutesMap = () => {
               } else {
                 return (
                   <Polyline
-                    key={`segment-${idx}`}
+                    key={`segment-${currentRouteIndex}-${idx}`}
                     positions={[segment.from, segment.to]}
                     color={segment.color}
                     weight={5}
@@ -964,90 +1109,132 @@ const TransportRoutesMap = () => {
           </div>
         ) : !routeFound ? (
           <div className="p-4 bg-blue-50 rounded-lg">
-            <p>Finding the best route for you...</p>
+            <p>Finding the best routes for you...</p>
           </div>
         ) : (
           <>
+            {/* Route selection tabs */}
+            <div className="mb-4">
+              <h3 className="font-semibold mb-2">Recommended Routes</h3>
+              <div className="flex flex-col space-y-2">
+                {routeOptions.map((route, idx) => (
+                  <button
+                    key={`route-option-${idx}`}
+                    className={`p-2 rounded-lg text-left ${
+                      currentRouteIndex === idx
+                        ? "bg-blue-100 border-l-4 border-blue-500"
+                        : "bg-gray-50 hover:bg-gray-100"
+                    }`}
+                    onClick={() => changeSelectedRoute(idx)}
+                  >
+                    <div className="font-medium">{route.label}</div>
+                    <div className="text-sm flex justify-between mt-1">
+                      <span>{formatTime(route.totalTime)}</span>
+                      <span>{formatFare(route.totalFare)}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="mb-4 p-4 bg-gray-50 rounded-lg">
               <h3 className="font-semibold">Summary</h3>
               <p>
-                Total Distance: {formatDistance(currentRoute.totalDistance)}
+                Total Distance:{" "}
+                {formatDistance(routeOptions[currentRouteIndex].totalDistance)}
               </p>
-              <p>Estimated Time: {formatTime(currentRoute.totalTime)}</p>
-              <p>Total Fare: {formatFare(currentRoute.totalFare || 0)}</p>
+              <p>
+                Estimated Time:{" "}
+                {formatTime(routeOptions[currentRouteIndex].totalTime)}
+              </p>
+              <p>
+                Total Fare:{" "}
+                {formatFare(routeOptions[currentRouteIndex].totalFare || 0)}
+              </p>
               <p>
                 Transfers:{" "}
-                {transferPoints.filter((p) => p.type === "transfer").length}
+                {allTransferPoints[currentRouteIndex]?.filter(
+                  (p) => p.type === "transfer"
+                ).length || 0}
               </p>
             </div>
 
             <div className="mb-4">
               <h3 className="font-semibold mb-2">Step-by-Step Instructions</h3>
               <ol className="list-decimal pl-5 space-y-4">
-                {currentRoute.segments.map((segment, idx) => (
-                  <li key={`step-${idx}`} className="border-b pb-2">
-                    <div className="flex items-center mb-2">
-                      <span
-                        className="w-6 h-6 rounded-full mr-2 flex items-center justify-center text-white"
-                        style={{ backgroundColor: segment.color }}
-                      >
-                        {getModeIcon(segment.type)}
-                      </span>
-                      <span className="font-medium capitalize">
-                        {segment.type}
-                      </span>
-                      <span className="ml-auto text-blue-600 font-medium">
-                        {formatFare(segment.fare || 0)}
-                      </span>
-                    </div>
+                {routeOptions[currentRouteIndex].segments.map(
+                  (segment, idx) => (
+                    <li key={`step-${idx}`} className="border-b pb-2">
+                      <div className="flex items-center mb-2">
+                        <span
+                          className="w-6 h-6 rounded-full mr-2 flex items-center justify-center text-white"
+                          style={{ backgroundColor: segment.color }}
+                        >
+                          {getModeIcon(segment.type)}
+                        </span>
+                        <span className="font-medium capitalize">
+                          {segment.type}
+                        </span>
+                        <span className="ml-auto text-blue-600 font-medium">
+                          {formatFare(segment.fare || 0)}
+                        </span>
+                      </div>
 
-                    {segment.type === "walk" ? (
-                      <p>
-                        Walk{" "}
-                        {formatDistance(
-                          walkingRoutes[idx]?.distance ||
-                            segment.distance ||
-                            calculateDistance(segment.from, segment.to)
-                        )}
-                        {idx === 0 &&
-                          " to reach " +
-                            (currentRoute.segments[1]?.route?.name ||
-                              "your route")}
-                        {idx > 0 &&
-                          idx < currentRoute.segments.length - 1 &&
-                          " to transfer to " +
-                            (currentRoute.segments[idx + 1]?.route?.name ||
-                              "your next route")}
-                        {idx === currentRoute.segments.length - 1 &&
-                          " to reach your destination"}
-                      </p>
-                    ) : (
-                      <p>
-                        Take {segment.route.name}{" "}
-                        {segment.route.properties?.ref
-                          ? `(${segment.route.properties.ref})`
-                          : ""}
-                        {segment.route.properties?.from &&
-                        segment.route.properties?.to
-                          ? ` from ${segment.route.properties.from} to ${segment.route.properties.to}`
-                          : ""}
-                      </p>
-                    )}
-
-                    {walkingRoutes[idx]?.instructions &&
-                      segment.type === "walk" && (
-                        <ul className="text-sm text-gray-600 mt-2 list-disc pl-5">
-                          {walkingRoutes[idx].instructions
-                            .slice(0, -1)
-                            .map((instruction, insIdx) => (
-                              <li key={`instruction-${idx}-${insIdx}`}>
-                                {instruction.text}
-                              </li>
-                            ))}
-                        </ul>
+                      {segment.type === "walk" ? (
+                        <p>
+                          Walk{" "}
+                          {formatDistance(
+                            allWalkingRoutes[currentRouteIndex]?.[idx]
+                              ?.distance ||
+                              segment.distance ||
+                              calculateDistance(segment.from, segment.to)
+                          )}
+                          {idx === 0 &&
+                            " to reach " +
+                              (routeOptions[currentRouteIndex].segments[1]
+                                ?.route?.name || "your route")}
+                          {idx > 0 &&
+                            idx <
+                              routeOptions[currentRouteIndex].segments.length -
+                                1 &&
+                            " to transfer to " +
+                              (routeOptions[currentRouteIndex].segments[idx + 1]
+                                ?.route?.name || "your next route")}
+                          {idx ===
+                            routeOptions[currentRouteIndex].segments.length -
+                              1 && " to reach your destination"}
+                        </p>
+                      ) : (
+                        <p>
+                          Take {segment.route.name}{" "}
+                          {segment.route.properties?.ref
+                            ? `(${segment.route.properties.ref})`
+                            : ""}
+                          {segment.route.properties?.from &&
+                          segment.route.properties?.to
+                            ? ` from ${segment.route.properties.from} to ${segment.route.properties.to}`
+                            : ""}
+                        </p>
                       )}
-                  </li>
-                ))}
+
+                      {allWalkingRoutes[currentRouteIndex]?.[idx]
+                        ?.instructions &&
+                        segment.type === "walk" && (
+                          <ul className="text-sm text-gray-600 mt-2 list-disc pl-5">
+                            {allWalkingRoutes[currentRouteIndex][
+                              idx
+                            ].instructions
+                              .slice(0, -1)
+                              .map((instruction, insIdx) => (
+                                <li key={`instruction-${idx}-${insIdx}`}>
+                                  {instruction.text}
+                                </li>
+                              ))}
+                          </ul>
+                        )}
+                    </li>
+                  )
+                )}
               </ol>
             </div>
 
