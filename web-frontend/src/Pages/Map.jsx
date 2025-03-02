@@ -50,11 +50,10 @@ const modeColors = {
   other: "#607d8b",
 };
 
-// Mode preferences for diverse route generation
 const modePreferences = [
-  ["train", "bus", "jeep", "ferry", "tricycle", "walk", "other"], // Default - prefers trains
-  ["bus", "jeep", "ferry", "train", "tricycle", "walk", "other"], // Bus preference
-  ["jeep", "ferry", "tricycle", "bus", "train", "walk", "other"], // Local transport preference
+  ["train", "bus", "jeep", "ferry", "tricycle", "walk", "other"],
+  ["bus", "jeep", "ferry", "train", "tricycle", "walk", "other"],
+  ["jeep", "ferry", "tricycle", "bus", "train", "walk", "other"],
 ];
 
 const MapViewSetter = ({ bounds }) => {
@@ -132,7 +131,10 @@ const TransportRoutesMap = () => {
   const [destination, setDestination] = useState(null);
   const [routeFound, setRouteFound] = useState(false);
 
-  // Modified states for multiple route options
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [trafficLevel, setTrafficLevel] = useState("moderate");
+  const [showTraffic, setShowTraffic] = useState(true);
+
   const [routeOptions, setRouteOptions] = useState([]);
   const [currentRouteIndex, setCurrentRouteIndex] = useState(0);
   const [allTransferPoints, setAllTransferPoints] = useState([]);
@@ -303,7 +305,6 @@ const TransportRoutesMap = () => {
     return distance;
   };
 
-  // Modified to accept a preferredMode parameter for diverse routes
   const findNearestPointOnRoute = (coordinate, route) => {
     if (!route || !route.coordinates || route.coordinates.length === 0) {
       return null;
@@ -325,7 +326,6 @@ const TransportRoutesMap = () => {
     return { point: nearestPoint, distance: minDistance, index: pointIndex };
   };
 
-  // Modified to prioritize routes by mode preferences
   const findNearestRoute = (
     coordinate,
     routes,
@@ -341,16 +341,13 @@ const TransportRoutesMap = () => {
     let nearestPoint = null;
     let pointIndex = -1;
 
-    // First sort routes by preference
     const sortedRoutes = [...routes].sort((a, b) => {
       const aIndex = modePreference.indexOf(a.mode);
       const bIndex = modePreference.indexOf(b.mode);
       return aIndex - bIndex;
     });
 
-    // Then find nearest point considering excluded routes
     sortedRoutes.forEach((route) => {
-      // Skip excluded routes
       if (excludeRouteIds.includes(route.id)) return;
 
       const result = findNearestPointOnRoute(coordinate, route);
@@ -370,7 +367,33 @@ const TransportRoutesMap = () => {
     };
   };
 
-  // Modified findRoute to calculate multiple route options
+  const getTrafficLevelFromTime = (time) => {
+    const hour = time.getHours();
+    const day = time.getDay();
+
+    if (
+      day >= 1 &&
+      day <= 5 &&
+      ((hour >= 7 && hour <= 9) || (hour >= 17 && hour <= 19))
+    ) {
+      return "heavy";
+    }
+
+    if ((day === 0 || day === 6) && hour >= 11 && hour <= 15) {
+      return "moderate";
+    }
+
+    if (hour >= 22 || hour <= 5) {
+      return "low";
+    }
+
+    return "moderate";
+  };
+
+  useEffect(() => {
+    setTrafficLevel(getTrafficLevelFromTime(currentTime));
+  }, [currentTime]);
+
   const findRoute = () => {
     if (!source || !destination || !routeData || routeData.length === 0) {
       return;
@@ -381,14 +404,12 @@ const TransportRoutesMap = () => {
     const allTransfers = [];
     const allWalking = [];
 
-    // Try to find 3 distinct routes using different mode preferences
     for (let prefIndex = 0; prefIndex < modePreferences.length; prefIndex++) {
       const modePreference = modePreferences[prefIndex];
       const excludeRouteIds = foundRoutes.flatMap((route) =>
         route.segments.filter((seg) => seg.route).map((seg) => seg.route.id)
       );
 
-      // Direct walking route (only calculate once)
       if (prefIndex === 0) {
         const directDistance = calculateDistance(source, destination);
         if (directDistance <= 500) {
@@ -415,15 +436,12 @@ const TransportRoutesMap = () => {
           allWalking.push([]);
           allTransfers.push([]);
 
-          // Only one walking route makes sense
           break;
         }
       }
 
-      // Skip route calculation if we already have 3 routes
       if (foundRoutes.length >= 3) break;
 
-      // Find nearest routes with mode preference
       const sourceResult = findNearestRoute(
         source,
         routeData,
@@ -440,7 +458,6 @@ const TransportRoutesMap = () => {
       );
       if (!destResult) continue;
 
-      // If both source and destination are on the same route
       if (sourceResult.route.id === destResult.route.id) {
         const sourceIndex = sourceResult.index;
         const destIndex = destResult.index;
@@ -532,10 +549,7 @@ const TransportRoutesMap = () => {
         ]);
 
         allWalking.push([]);
-      }
-      // Need to find transfer routes
-      else {
-        // Try to find a transfer route, skipping already used routes
+      } else {
         let minTotalDistance = Infinity;
         let bestSourceRoute = null;
         let bestDestRoute = null;
@@ -543,7 +557,6 @@ const TransportRoutesMap = () => {
         let bestSourceNearestPoint = null;
         let bestDestNearestPoint = null;
 
-        // Try to find different transfer routes (more distinct options)
         const routesToTry = routeData.filter(
           (r) => !excludeRouteIds.includes(r.id)
         );
@@ -692,7 +705,6 @@ const TransportRoutesMap = () => {
 
           allWalking.push([]);
         } else {
-          // If no transfer found, just try walking between routes
           const initialWalkDistance = sourceResult.distance;
           const transferWalkDistance = calculateDistance(
             sourceResult.point,
@@ -797,10 +809,8 @@ const TransportRoutesMap = () => {
       }
     }
 
-    // Sort routes by totalTime for initial display
     foundRoutes.sort((a, b) => a.totalTime - b.totalTime);
 
-    // Add descriptive labels based on route characteristics
     foundRoutes.forEach((route, index) => {
       if (!route.label) {
         if (index === 0) route.label = "Fastest Route";
@@ -821,9 +831,7 @@ const TransportRoutesMap = () => {
       }
     });
 
-    // If we found at least one route
     if (foundRoutes.length > 0) {
-      // Calculate map bounds for first route
       const firstRouteBounds = calculateRouteBounds(foundRoutes[0]);
 
       setRouteOptions(foundRoutes);
@@ -840,7 +848,6 @@ const TransportRoutesMap = () => {
     setLoading(false);
   };
 
-  // Helper to calculate bounds for a route
   const calculateRouteBounds = (route) => {
     if (!route) return [];
 
@@ -857,28 +864,100 @@ const TransportRoutesMap = () => {
     return points;
   };
 
-  const getSpeed = (mode) => {
+  const getTrafficFactor = (mode, hour, day) => {
+    if (mode === "train" || mode === "ferry" || mode === "walk") {
+      return 1;
+    }
+
+    const isMorningPeak = hour >= 7 && hour <= 9 && day >= 1 && day <= 5;
+    const isEveningPeak = hour >= 17 && hour <= 19 && day >= 1 && day <= 5;
+    const isWeekendMidday =
+      hour >= 11 && hour <= 14 && (day === 0 || day === 6);
+
+    if (mode === "bus") {
+      if (isMorningPeak || isEveningPeak) return 0.6;
+      if (isWeekendMidday) return 0.8;
+      return 0.9;
+    }
+
+    if (mode === "jeep") {
+      if (isMorningPeak || isEveningPeak) return 0.55;
+      if (isWeekendMidday) return 0.75;
+      return 0.85;
+    }
+
+    if (mode === "tricycle") {
+      if (isMorningPeak || isEveningPeak) return 0.7;
+      if (isWeekendMidday) return 0.8;
+      return 0.9;
+    }
+
+    return 0.8;
+  };
+
+  const getSpeed = (mode, useTraffic = true) => {
+    let baseSpeed;
     switch (mode) {
       case "train":
-        return 13.9;
+        baseSpeed = 13.9;
       case "bus":
-        return 8.3;
+        baseSpeed = 8.3;
+        break;
       case "jeep":
-        return 6.9;
+        baseSpeed = 6.9;
+        break;
       case "ferry":
-        return 5.6;
+        baseSpeed = 5.6;
+        break;
       case "tricycle":
-        return 5.6;
+        baseSpeed = 5.6;
+        break;
       case "walk":
-        return 1.4;
+        baseSpeed = 1.4;
+        break;
       default:
-        return 8.3;
+        baseSpeed = 8.3;
     }
+
+    if (
+      !useTraffic ||
+      !showTraffic ||
+      mode === "train" ||
+      mode === "ferry" ||
+      mode === "walk"
+    ) {
+      return baseSpeed;
+    }
+
+    const hour = currentTime.getHours();
+    const day = currentTime.getDay();
+
+    const trafficFactor = getTrafficFactor(mode, hour, day);
+    return baseSpeed * trafficFactor;
   };
 
   const formatTime = (seconds) => {
     const minutes = Math.round(seconds / 60);
-    return `${minutes} min`;
+    if (minutes < 60) {
+      return `${minutes} min`;
+    } else {
+      const hours = Math.floor(minutes / 60);
+      const remainingMinutes = minutes % 60;
+      return `${hours}h ${remainingMinutes}min`;
+    }
+  };
+
+  const getTrafficDescription = (level) => {
+    switch (level) {
+      case "low":
+        return "Light traffic, faster travel expected";
+      case "moderate":
+        return "Moderate traffic, average travel times";
+      case "heavy":
+        return "Heavy traffic, expect delays";
+      default:
+        return "Traffic conditions unknown";
+    }
   };
 
   const formatDistance = (meters) => {
@@ -936,7 +1015,6 @@ const TransportRoutesMap = () => {
     });
   };
 
-  // Change currently displayed route
   const changeSelectedRoute = (index) => {
     if (index >= 0 && index < routeOptions.length) {
       setCurrentRouteIndex(index);
@@ -969,6 +1047,51 @@ const TransportRoutesMap = () => {
     }
   };
 
+  const handleTimeChange = (e) => {
+    const [hours, minutes] = e.target.value.split(":").map(Number);
+    const newTime = new Date();
+    newTime.setHours(hours, minutes, 0);
+    setCurrentTime(newTime);
+  };
+
+  const toggleTraffic = () => {
+    setShowTraffic(!showTraffic);
+
+    if (routeOptions.length > 0) {
+      const updatedRoutes = routeOptions.map((route) => {
+        const newTotalTime = route.segments.reduce((total, segment) => {
+          if (segment.type === "walk") {
+            return total + segment.distance / getSpeed("walk", false);
+          } else {
+            return (
+              total + segment.distance / getSpeed(segment.type, !showTraffic)
+            );
+          }
+        }, 0);
+
+        return {
+          ...route,
+          totalTime: newTotalTime,
+        };
+      });
+
+      setRouteOptions(updatedRoutes);
+    }
+  };
+
+  const getTrafficColor = (level) => {
+    switch (level) {
+      case "low":
+        return "#4CAF50";
+      case "moderate":
+        return "#FF9800";
+      case "heavy":
+        return "#F44336";
+      default:
+        return "#9E9E9E";
+    }
+  };
+
   return (
     <div className="relative w-full h-screen flex">
       <div className="relative w-3/4 h-screen">
@@ -983,6 +1106,20 @@ const TransportRoutesMap = () => {
             <div className="text-red-500 p-4 bg-red-50 rounded-lg">
               <p className="font-semibold">Error</p>
               <p>{error}</p>
+            </div>
+          </div>
+        )}
+
+        {showTraffic && routeFound && (
+          <div className="absolute top-4 right-4 z-10 bg-white p-2 rounded-lg shadow-md">
+            <div className="flex items-center">
+              <div
+                className="w-4 h-4 rounded-full mr-2"
+                style={{ backgroundColor: getTrafficColor(trafficLevel) }}
+              ></div>
+              <span className="text-sm font-medium capitalize">
+                {trafficLevel} Traffic
+              </span>
             </div>
           </div>
         )}
@@ -1113,7 +1250,49 @@ const TransportRoutesMap = () => {
           </div>
         ) : (
           <>
-            {/* Route selection tabs */}
+            <div className="mb-4 p-3 bg-gray-50 rounded-lg">
+              <div className="flex justify-between items-center mb-2">
+                <h3 className="font-semibold">Traffic Analysis</h3>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showTraffic}
+                    onChange={toggleTraffic}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                </label>
+              </div>
+
+              <div className="flex items-center mb-2">
+                <span className="text-sm mr-2">Departure Time:</span>
+                <input
+                  type="time"
+                  value={`${currentTime
+                    .getHours()
+                    .toString()
+                    .padStart(2, "0")}:${currentTime
+                    .getMinutes()
+                    .toString()
+                    .padStart(2, "0")}`}
+                  onChange={handleTimeChange}
+                  className="border rounded px-2 py-1 text-sm w-20"
+                />
+              </div>
+
+              {showTraffic && (
+                <div className="flex items-center mt-2">
+                  <div
+                    className="w-3 h-3 rounded-full mr-2"
+                    style={{ backgroundColor: getTrafficColor(trafficLevel) }}
+                  ></div>
+                  <span className="text-xs text-gray-600">
+                    {getTrafficDescription(trafficLevel)}
+                  </span>
+                </div>
+              )}
+            </div>
+
             <div className="mb-4">
               <h3 className="font-semibold mb-2">Recommended Routes</h3>
               <div className="flex flex-col space-y-2">
@@ -1132,6 +1311,30 @@ const TransportRoutesMap = () => {
                       <span>{formatTime(route.totalTime)}</span>
                       <span>{formatFare(route.totalFare)}</span>
                     </div>
+                    {showTraffic && (
+                      <div className="text-xs mt-1">
+                        {route.segments.some(
+                          (seg) =>
+                            seg.type !== "walk" &&
+                            seg.type !== "train" &&
+                            seg.type !== "ferry"
+                        ) ? (
+                          <div className="flex items-center">
+                            <div
+                              className="w-2 h-2 rounded-full mr-1"
+                              style={{
+                                backgroundColor: getTrafficColor(trafficLevel),
+                              }}
+                            ></div>
+                            <span>Traffic affected</span>
+                          </div>
+                        ) : (
+                          <div className="text-green-600">
+                            Not affected by traffic
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </button>
                 ))}
               </div>
@@ -1181,40 +1384,83 @@ const TransportRoutesMap = () => {
                       </div>
 
                       {segment.type === "walk" ? (
-                        <p>
-                          Walk{" "}
-                          {formatDistance(
-                            allWalkingRoutes[currentRouteIndex]?.[idx]
-                              ?.distance ||
-                              segment.distance ||
-                              calculateDistance(segment.from, segment.to)
-                          )}
-                          {idx === 0 &&
-                            " to reach " +
-                              (routeOptions[currentRouteIndex].segments[1]
-                                ?.route?.name || "your route")}
-                          {idx > 0 &&
-                            idx <
+                        <div>
+                          <p>
+                            Walk{" "}
+                            {formatDistance(
+                              allWalkingRoutes[currentRouteIndex]?.[idx]
+                                ?.distance ||
+                                segment.distance ||
+                                calculateDistance(segment.from, segment.to)
+                            )}
+                            {idx === 0 &&
+                              " to reach " +
+                                (routeOptions[currentRouteIndex].segments[1]
+                                  ?.route?.name || "your route")}
+                            {idx > 0 &&
+                              idx <
+                                routeOptions[currentRouteIndex].segments
+                                  .length -
+                                  1 &&
+                              " to transfer to " +
+                                (routeOptions[currentRouteIndex].segments[
+                                  idx + 1
+                                ]?.route?.name || "your next route")}
+                            {idx ===
                               routeOptions[currentRouteIndex].segments.length -
-                                1 &&
-                            " to transfer to " +
-                              (routeOptions[currentRouteIndex].segments[idx + 1]
-                                ?.route?.name || "your next route")}
-                          {idx ===
-                            routeOptions[currentRouteIndex].segments.length -
-                              1 && " to reach your destination"}
-                        </p>
+                                1 && " to reach your destination"}
+                          </p>
+                          <p className="text-xs text-gray-500 mt-1">
+                            Est. time:{" "}
+                            {formatTime(
+                              (allWalkingRoutes[currentRouteIndex]?.[idx]
+                                ?.distance ||
+                                segment.distance ||
+                                calculateDistance(segment.from, segment.to)) /
+                                getSpeed("walk")
+                            )}
+                          </p>
+                        </div>
                       ) : (
-                        <p>
-                          Take {segment.route.name}{" "}
-                          {segment.route.properties?.ref
-                            ? `(${segment.route.properties.ref})`
-                            : ""}
-                          {segment.route.properties?.from &&
-                          segment.route.properties?.to
-                            ? ` from ${segment.route.properties.from} to ${segment.route.properties.to}`
-                            : ""}
-                        </p>
+                        <div>
+                          <p>
+                            Take {segment.route.name}{" "}
+                            {segment.route.properties?.ref
+                              ? `(${segment.route.properties.ref})`
+                              : ""}
+                            {segment.route.properties?.from &&
+                            segment.route.properties?.to
+                              ? ` from ${segment.route.properties.from} to ${segment.route.properties.to}`
+                              : ""}
+                          </p>
+                          {showTraffic &&
+                            segment.type !== "train" &&
+                            segment.type !== "ferry" && (
+                              <div className="flex items-center mt-1">
+                                <div
+                                  className="w-2 h-2 rounded-full mr-1"
+                                  style={{
+                                    backgroundColor:
+                                      getTrafficColor(trafficLevel),
+                                  }}
+                                ></div>
+                                <p className="text-xs">
+                                  {trafficLevel === "heavy"
+                                    ? "Heavy traffic expected"
+                                    : trafficLevel === "moderate"
+                                    ? "Moderate traffic expected"
+                                    : "Light traffic expected"}
+                                </p>
+                              </div>
+                            )}
+                          <p className="text-xs text-gray-500 mt-1">
+                            Est. time:{" "}
+                            {formatTime(
+                              segment.distance /
+                                getSpeed(segment.type, showTraffic)
+                            )}
+                          </p>
+                        </div>
                       )}
 
                       {allWalkingRoutes[currentRouteIndex]?.[idx]
